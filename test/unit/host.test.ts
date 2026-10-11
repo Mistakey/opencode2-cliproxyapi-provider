@@ -21,6 +21,7 @@ function completeContext(): Record<string, unknown> {
       connection: { active: fn, resolve: fn },
     },
     provider: { transform: fn },
+    rpc: { register: fn },
   }
 }
 

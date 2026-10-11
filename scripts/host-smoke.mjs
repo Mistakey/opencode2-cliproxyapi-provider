@@ -131,10 +131,24 @@ function requestText(request) {
 }
 
 async function main() {
+  // Create the sandbox first: the host needs the cwd to exist before it runs,
+  // and a leftover isolated service holds the data directory.
   for (const relative of ["home", "appdata", "localappdata", "tmp", "config/opencode", "ws"]) {
     mkdirSync(join(SANDBOX, relative), { recursive: true })
   }
-  for (const relative of ["data", "cache", "state"]) rmSync(join(SANDBOX, relative), { recursive: true, force: true })
+  await runOpencode(["service", "stop"])
+  await sleep(500)
+  for (const relative of ["data", "cache", "state"]) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        rmSync(join(SANDBOX, relative), { recursive: true, force: true })
+        break
+      } catch (error) {
+        if (attempt >= 20) throw error
+        await sleep(250)
+      }
+    }
+  }
   writeFileSync(join(SANDBOX, "ws", "smoke.txt"), `${FILE_LINE}\nsecond line\n`)
 
   let primaryRequests = 0
@@ -192,7 +206,6 @@ async function main() {
   const version = await runOpencode(["--version"])
   record("host reports its version", version.status === 0, version.output.trim().split("\n")[0])
 
-  await runOpencode(["service", "stop"])
   const port = await freePort()
   await runOpencode(["service", "set", "port", String(port)])
   const started = await runOpencode(["service", "start"])

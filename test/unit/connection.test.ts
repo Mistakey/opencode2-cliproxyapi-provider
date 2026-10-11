@@ -41,6 +41,15 @@ describe("readExplicitConfig", () => {
   test("ignores blank option values", () => {
     expect(readExplicitConfig({ apiKey: "   " }, {}).apiKey).toBeUndefined()
   })
+
+  test("records which explicit source supplied each half", () => {
+    expect(readExplicitConfig({ baseURL: "http://option.test" }, { [ENV_API_KEY]: "env-key" }).sources).toEqual({
+      baseURL: "options",
+      apiKey: "env",
+    })
+    expect(readExplicitConfig({}, { [ENV_BASE_URL]: "http://env.test" }).sources).toEqual({ baseURL: "env" })
+    expect(readExplicitConfig(undefined, {}).sources).toEqual({})
+  })
 })
 
 describe("planConnection", () => {
@@ -50,7 +59,14 @@ describe("planConnection", () => {
     const result = planConnection({ explicit: {}, active })
     expect(result).toEqual({
       ok: true,
-      plan: { mode: "connection", key: "stored-key", address: "http://stored.test", store: false },
+      plan: {
+        mode: "connection",
+        key: "stored-key",
+        address: "http://stored.test",
+        store: false,
+        addressSource: "stored",
+        keySource: "stored",
+      },
     })
   })
 
@@ -64,7 +80,14 @@ describe("planConnection", () => {
     const result = planConnection({ explicit: { baseURL: "http://new.test", apiKey: "new-key" }, active })
     expect(result).toEqual({
       ok: true,
-      plan: { mode: "explicit", key: "new-key", address: "http://new.test", store: true },
+      plan: {
+        mode: "explicit",
+        key: "new-key",
+        address: "http://new.test",
+        store: true,
+        addressSource: "options",
+        keySource: "options",
+      },
     })
   })
 
@@ -72,7 +95,14 @@ describe("planConnection", () => {
     const result = planConnection({ explicit: { baseURL: "http://stored.test", apiKey: "stored-key" }, active })
     expect(result).toEqual({
       ok: true,
-      plan: { mode: "explicit", key: "stored-key", address: "http://stored.test", store: false },
+      plan: {
+        mode: "explicit",
+        key: "stored-key",
+        address: "http://stored.test",
+        store: false,
+        addressSource: "options",
+        keySource: "options",
+      },
     })
   })
 
@@ -81,11 +111,18 @@ describe("planConnection", () => {
     expect(result.ok === true && result.plan.store).toBe(true)
   })
 
-  test("uses the stored key for an address-only override", () => {
+  test("uses the stored key for an address-only override and reports both sources", () => {
     const result = planConnection({ explicit: { baseURL: "http://override.test" }, active })
     expect(result).toEqual({
       ok: true,
-      plan: { mode: "explicit", key: "stored-key", address: "http://override.test", store: false },
+      plan: {
+        mode: "explicit",
+        key: "stored-key",
+        address: "http://override.test",
+        store: false,
+        addressSource: "options",
+        keySource: "stored",
+      },
     })
   })
 
@@ -97,6 +134,20 @@ describe("planConnection", () => {
   test("falls back to the documented default address only in explicit mode", () => {
     const result = planConnection({ explicit: { apiKey: "fresh-key" } })
     expect(result.ok === true && result.plan.address).toBe(DEFAULT_BASE_URL)
+    expect(result.ok === true && result.plan.addressSource).toBe("default")
+  })
+
+  test("reports an environment key paired with the stored address", () => {
+    const result = planConnection({
+      explicit: { apiKey: "env-key", sources: { apiKey: "env" } },
+      active,
+    })
+    expect(result.ok === true && result.plan).toMatchObject({
+      address: "http://stored.test",
+      addressSource: "stored",
+      keySource: "env",
+      store: true,
+    })
   })
 })
 

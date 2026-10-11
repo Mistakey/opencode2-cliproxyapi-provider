@@ -72,7 +72,9 @@ export function checkHostVersion(version: unknown): HostIssue | undefined {
 function readPath(input: unknown, path: string): unknown {
   let current: unknown = input
   for (const key of path.split(".")) {
-    if (typeof current !== "object" || current === null) return undefined
+    // The host exposes `rpc` as a callable function that also carries methods,
+    // so a function is a valid node on the way down.
+    if (current === null || (typeof current !== "object" && typeof current !== "function")) return undefined
     current = (current as Record<string, unknown>)[key]
   }
   return current
@@ -85,6 +87,7 @@ export const REQUIRED_FUNCTIONS: readonly string[] = [
   "integration.connection.active",
   "integration.connection.resolve",
   "provider.transform",
+  "rpc.register",
 ]
 
 /** Plain data the plugin reads during setup. */
