@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode2-cliproxyapi-provider",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenCode v2 provider plugin for CLIProxyAPI (CPA)",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@opencode/plugin": ">=2.0.26 <3"
+  },
+  "devDependencies": {
+    "@opencode/ai": "2.0.26",
+    "@opencode/plugin": "2.0.26",
+    "@opencode/schema": "2.0.26",
+    "@types/bun": "^1.3.10",
+    "typescript": "5.8.2"
+  },
+  "scripts": {
+    "test": "bun test",
+    "test:unit": "bun test test/unit",
+    "test:integration": "bun test test/integration",
+    "typecheck": "tsc --noEmit",
+    "smoke:host": "bun scripts/host-smoke.mjs"
+  },
+  "opencode": {
+    "supported": ">=2.0.26 <3",
+    "tested": "2.0.26"
+  }
+}
