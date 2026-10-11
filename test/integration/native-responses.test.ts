@@ -13,6 +13,7 @@ import * as AI from "@opencode/ai/promise"
 import { Media, Message, ToolCallPart, ToolResultPart } from "@opencode/ai"
 import { model } from "@opencode/ai/providers/openai-compatible/responses"
 import { resolveEndpoints } from "../../src/address"
+import { fetchCatalog } from "../../src/catalog"
 import { SUMMARY_PROMPT_MARKER, startMockCpa, textReply, toolCallReply } from "../support/mock-cpa.mjs"
 
 const API_KEY = "sk-fake-native-0001"
@@ -200,6 +201,31 @@ describe("native Responses runtime against the mock CPA", () => {
     )
     expect(JSON.stringify(mock.responses()[1]!.json.input)).not.toContain(SUMMARY_PROMPT_MARKER)
     expect(followUp.some((event) => event.type === "text-delta")).toBe(true)
+  })
+
+  test("keeps a reverse proxy subpath on both the directory and the response request", async () => {
+    mock = await startMockCpa({
+      models: [{ slug: "gpt-5.2-codex", display_name: "GPT-5.2 Codex" }],
+      responses: textReply("pong behind the proxy"),
+    })
+    const endpoints = resolveEndpoints(`${mock.url}/cpa`)
+    expect(endpoints.baseURL).toBe(`${mock.url}/cpa/v1`)
+
+    const entries = await fetchCatalog({ modelsURL: endpoints.modelsURL, apiKey: API_KEY })
+    expect(entries.map((entry) => entry.id)).toEqual(["gpt-5.2-codex"])
+
+    const lm = model("gpt-5.2-codex", { baseURL: endpoints.baseURL, apiKey: API_KEY })
+    const events = await collect(ai.llm.stream({ model: lm, prompt: "say pong" }) as AsyncIterable<Record<string, unknown>>)
+
+    const directory = mock.requests.find((request) => request.method === "GET")!
+    expect(directory.path).toBe("/cpa/v1/models")
+    expect(directory.query.client_version).toStartWith("opencode2-cliproxyapi-provider/")
+
+    const request = mock.responses()[0]!
+    expect(request.path).toBe("/cpa/v1/responses")
+    expect(request.headers.authorization).toBe(`Bearer ${API_KEY}`)
+    expect(request.json.model).toBe("gpt-5.2-codex")
+    expect(events.some((event) => event.type === "text-delta")).toBe(true)
   })
 
   test("surfaces a provider error instead of an empty result", async () => {

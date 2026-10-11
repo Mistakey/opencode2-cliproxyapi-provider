@@ -34,6 +34,14 @@ afterEach(async () => {
 })
 
 describe("plugin setup", () => {
+  test("exports a v2 plugin definition with no v1 entry", () => {
+    const definition = plugin as unknown as Record<string, unknown>
+    expect(typeof definition.id).toBe("string")
+    expect(typeof definition.setup).toBe("function")
+    expect("server" in definition).toBe(false)
+    expect("effect" in definition).toBe(false)
+  })
+
   test("registers the CPA key method, stores the explicit key once and binds the catalog to that connection", async () => {
     mock = await startMockCpa({ models })
     host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
