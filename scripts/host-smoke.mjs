@@ -159,20 +159,27 @@ async function main() {
   writeFileSync(join(SANDBOX, "ws", "smoke.txt"), `${FILE_LINE}\nsecond line\n`)
 
   let primaryRequests = 0
+  // Lets the restart check hold the directory down so the cached fast start is
+  // observable instead of racing the background refresh.
+  let directoryDown = false
+  const smokeModels = [
+    {
+      slug: MODEL_ID,
+      display_name: "Smoke Model",
+      context_window: 128_000,
+      max_output_tokens: 8_192,
+      input_modalities: ["text", "image"],
+      supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }],
+      service_tiers: [{ id: "priority" }, { id: "flex" }],
+    },
+    { slug: PLAIN_MODEL_ID, display_name: "Smoke Plain" },
+    { slug: SPEED_ONLY_MODEL_ID, display_name: "Smoke Speed Only", additional_speed_tiers: ["priority"] },
+  ]
   const mock = await startMockCpa({
-    models: [
-      {
-        slug: MODEL_ID,
-        display_name: "Smoke Model",
-        context_window: 128_000,
-        max_output_tokens: 8_192,
-        input_modalities: ["text", "image"],
-        supported_reasoning_levels: [{ effort: "low" }, { effort: "medium" }],
-        service_tiers: [{ id: "priority" }, { id: "flex" }],
-      },
-      { slug: PLAIN_MODEL_ID, display_name: "Smoke Plain" },
-      { slug: SPEED_ONLY_MODEL_ID, display_name: "Smoke Speed Only", additional_speed_tiers: ["priority"] },
-    ],
+    directory: () =>
+      directoryDown
+        ? { status: 503, body: { error: { message: "upstream down" } } }
+        : { status: 200, body: { models: smokeModels } },
     responses: (request) => {
       const body = request.json ?? {}
       const instructions = typeof body.instructions === "string" ? body.instructions : ""
@@ -468,12 +475,14 @@ async function main() {
     const offAgain = await runModel("ses_smoke_fast_off", MODEL_ID)
     record("Fast off removes the priority parameter again", lastTier() === undefined, String(lastTier()))
 
-    // Restart: the preference is durable, so a fresh service must both report it
-    // and send the parameter without another toggle.
+    // Restart with the directory held down: the plugin must fast-start from the
+    // persisted cache, keep the Fast capability and price, and send the priority
+    // parameter for a cached model.
     await rpc("setFast", { enabled: true })
     await reload()
     await runOpencode(["service", "stop"])
     await sleep(500)
+    directoryDown = true
     const restarted = await runOpencode(["service", "start"])
     record("the isolated service restarted", restarted.status === 0, restarted.output.trim().split("\n").slice(-1)[0])
     const restartedState = JSON.parse(readFileSync(join(SANDBOX, "state", "opencode", "service.json"), "utf8"))
@@ -486,8 +495,23 @@ async function main() {
       restored?.fastEnabled === true && restored?.fastEffectiveModels === 1,
       JSON.stringify({ fast: restored?.fastEnabled, effective: restored?.fastEffectiveModels }),
     )
+    record(
+      "the restarted plugin serves the cached catalog with Fast and prices intact",
+      restored?.catalogFromCache === true &&
+        restored?.catalogModels === 3 &&
+        restored?.costModels === 1 &&
+        restored?.fastEffectiveModels === 1,
+      JSON.stringify({
+        fromCache: restored?.catalogFromCache,
+        catalogModels: restored?.catalogModels,
+        costModels: restored?.costModels,
+        effective: restored?.fastEffectiveModels,
+      }),
+    )
     const restoredRun = await runModel("ses_smoke_fast_restored", MODEL_ID)
     record("a request after the restart carries the priority parameter", lastTier() === "priority", String(lastTier()))
+    directoryDown = false
+    await rpc("refresh", {})
 
     for (const [index, request] of mock.responses().entries()) {
       const body = request.json ?? {}
