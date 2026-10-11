@@ -230,7 +230,9 @@ bun run smoke:connection
 matching cache before the background refresh lands, a failed refresh keeping the
 last directory, a legal empty directory staying distinct from a failure, manual
 refresh over RPC, stale retention, recovery and expiry, the stale warning
-emitted for a real request, and per-credential cache isolation.
+emitted for a real request, per-credential cache isolation, and a location
+reload cancelling an in-flight refresh so the superseded instance cannot commit
+its result.
 
 ```bash
 bun run smoke:catalog

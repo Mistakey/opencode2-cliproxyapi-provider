@@ -335,6 +335,34 @@ async function main() {
         !alphaKeyModels.some((model) => model.id === "gamma"),
       alphaKeyModels.map((model) => model.id).join(","),
     )
+
+    // 11. A reload cancels an in-flight refresh: the superseded plugin instance
+    //     must not commit its (older) result into the new one.
+    let reloadGets = 0
+    directory = () => {
+      reloadGets += 1
+      if (reloadGets === 1) {
+        return new Promise((resolve) =>
+          setTimeout(() => resolve({ status: 200, body: { models: [{ slug: "reload-b" }] } }), 2500),
+        )
+      }
+      return { status: 200, body: { models: [alpha, beta] } }
+    }
+    const inflight = rpc("refresh", {}).catch(() => undefined)
+    await sleep(400)
+    await serviceClient().location.reload().catch(() => undefined)
+    await sleep(5500)
+    const afterReload = await status()
+    const afterReloadModels = await listedModels()
+    record(
+      "a reload cancels an in-flight refresh without committing its result",
+      reloadGets >= 2 &&
+        !afterReloadModels.some((model) => model.id === "reload-b") &&
+        afterReloadModels.map((model) => model.id).sort().join(",") === "alpha,beta" &&
+        afterReload.catalogModels === 2,
+      JSON.stringify({ gets: reloadGets, models: afterReloadModels.map((model) => model.id) }),
+    )
+    await inflight
   } finally {
     await runOpencode(["service", "stop"])
     await mock.close()
