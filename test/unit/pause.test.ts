@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { PauseGate } from "../../src/pause"
+import { PauseCancelledError, PauseGate } from "../../src/pause"
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 
@@ -68,14 +68,15 @@ describe("PauseGate", () => {
     expect(resolved).toBe(true)
   })
 
-  test("unloading releases every wait and clears the bookkeeping", async () => {
+  test("unloading cancels every wait so a paused request is not sent", async () => {
     const gate = new PauseGate()
     gate.pause()
     const waits = [gate.wait("ses_a"), gate.wait("ses_b")]
     expect(gate.read().waiting).toBe(2)
 
     expect(gate.releaseAll()).toBe(2)
-    await Promise.all(waits)
+    await expect(waits[0]).rejects.toBeInstanceOf(PauseCancelledError)
+    await expect(waits[1]).rejects.toBeInstanceOf(PauseCancelledError)
     expect(gate.read().waiting).toBe(0)
   })
 
@@ -86,18 +87,14 @@ describe("PauseGate", () => {
     expect(state.waiting).toBe(0)
   })
 
-  test("close releases every wait and refuses new ones", async () => {
+  test("close cancels every wait and refuses new ones", async () => {
     const gate = new PauseGate()
     gate.pause()
-    let resolved = false
-    const waiting = gate.wait("ses_a").then(() => {
-      resolved = true
-    })
+    const waiting = gate.wait("ses_a")
     expect(gate.read().waiting).toBe(1)
 
     expect(gate.close()).toBe(1)
-    await waiting
-    expect(resolved).toBe(true)
+    await expect(waiting).rejects.toBeInstanceOf(PauseCancelledError)
     expect(gate.read().waiting).toBe(0)
     expect(gate.read().paused).toBe(false)
 

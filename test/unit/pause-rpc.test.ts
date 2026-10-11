@@ -225,7 +225,7 @@ describe("pause gate over the server RPC", () => {
     expect(turn.pausedMs).toBeLessThanOrEqual(turn.effectiveMs + turn.pausedMs)
   })
 
-  test("a location shutdown ends a held wait and stops the stream", async () => {
+  test("a location shutdown cancels a held wait and stops the stream", async () => {
     mock = await startMockCpa({ models: [{ slug: "a" }] })
     host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
     await setup(host)
@@ -234,16 +234,17 @@ describe("pause gate over the server RPC", () => {
     const hook = host.sessionHooks[0]!
 
     await handlers.pause({})
-    let sent = false
-    const pending = Promise.resolve(hook.callback({ sessionID: "ses_reload", kind: "primary" })).then(() => {
-      sent = true
-    })
+    let outcome = "pending"
+    const pending = Promise.resolve(hook.callback({ sessionID: "ses_reload", kind: "primary" }))
+      .then(() => (outcome = "resolved"))
+      .catch(() => (outcome = "cancelled"))
     await sleep(0)
     expect((await handlers.pauseState({})).waiting).toBe(1)
 
     host.pushEvent(hostEvent("location.shutdown", {}))
     await pending
-    expect(sent).toBe(true)
+    // The unloaded generation must not let the paused request through.
+    expect(outcome).toBe("cancelled")
     expect(await handlers.pauseState({})).toMatchObject({ paused: false, waiting: 0 })
 
     // The old generation's stream stopped: a later event is not observed.
@@ -255,7 +256,7 @@ describe("pause gate over the server RPC", () => {
     expect(await handlers.stats({ sessionID: "ses_after" })).toEqual({})
   })
 
-  test("unload releases the wait and disposes the hook", async () => {
+  test("unload cancels the wait and disposes the hook", async () => {
     mock = await startMockCpa({ models: [{ slug: "a" }] })
     host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
     await setup(host)
@@ -264,17 +265,17 @@ describe("pause gate over the server RPC", () => {
     const hook = host.sessionHooks[0]!
 
     await handlers.pause({})
-    let sent = false
-    const pending = Promise.resolve(hook.callback({ sessionID: "ses_unload", kind: "primary" })).then(() => {
-      sent = true
-    })
+    let outcome = "pending"
+    const pending = Promise.resolve(hook.callback({ sessionID: "ses_unload", kind: "primary" }))
+      .then(() => (outcome = "resolved"))
+      .catch(() => (outcome = "cancelled"))
     await sleep(0)
     expect((await handlers.pauseState({})).waiting).toBe(1)
 
     await cleanup?.()
     cleanup = undefined
     await pending
-    expect(sent).toBe(true)
+    expect(outcome).toBe("cancelled")
     expect(hook.disposed).toBe(true)
   })
 })

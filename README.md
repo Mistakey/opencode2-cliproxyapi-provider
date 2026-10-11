@@ -171,12 +171,14 @@ host does call the cleanup returned by `setup` — but only while no
 `model.request` hook invocation is still pending. A held pause wait is exactly
 such a pending hook: the host's scope close then waits on that fiber and the
 cleanup never runs, so the wait would be orphaned and the replaced generation's
-event subscription would keep receiving events. The plugin therefore ends its
+event subscription would keep receiving events. The plugin therefore cancels its
 held waits and stops its event subscription on `location.shutdown` instead of
-relying on the cleanup. A reload while a request is paused **releases** that
-request — it is sent and the session finishes, rather than being cancelled or
-left waiting — and the reloaded location starts running, like a restart. The
-returned cleanup stays as the fallback for the case where the host does call it.
+relying on the cleanup: a reload while a request is paused **cancels** that
+request — it is not sent, and the session ends with an error instead of hanging
+— and the reloaded location starts running, like a restart. Cancelling is the
+point: a reload (including the automatic reload the Fast setting performs) must
+not turn a pause into a silently sent request. The returned cleanup stays as the
+fallback for the case where the host does call it.
 
 `/cpa-stats` shows the breakdown and the footer shows the last turn. The same
 data is available over RPC (`stats`, `sessions`).
@@ -247,8 +249,9 @@ bun run smoke:connection
 `scripts/host-pause.mjs` covers the pause gate in a real host: a paused request
 is held before it is sent, an RPC resume releases it, another provider is not
 gated, interrupting a paused session ends the wait without sending the request,
-a live `location.reload()` ends the held wait and the reloaded location's gate
-still works, and stopping the host while a call is paused ends the wait too.
+a live `location.reload()` cancels the held wait without sending it and the
+reloaded location's gate still works, and stopping the host while a call is
+paused ends the wait too.
 
 ```bash
 bun run smoke:pause

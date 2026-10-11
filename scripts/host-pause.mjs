@@ -10,7 +10,7 @@
  *   2. `resume` releases it without depending on a model call
  *   3. pausing the CPA provider does not gate another provider
  *   4. interrupting a paused session ends the wait and never sends the request
- *   5. reloading the location ends the held wait without orphaning it
+ *   5. reloading the location cancels the held wait instead of sending it
  *   6. stopping the host while a call is paused ends the wait without a request
  *   7. the fictional key never reaches the host log
  *
@@ -145,9 +145,9 @@ async function main() {
     await prompt
     await rpc("resume")
 
-    // 5: a live location reload ends the held wait instead of orphaning it.
-    //     The host does not settle an in-flight hook itself; the plugin ends it
-    //     on `location.shutdown`, which is what a reload emits.
+    // 5: a live location reload cancels the held wait instead of sending it.
+    //     The host does not settle an in-flight hook itself; the plugin cancels
+    //     it on `location.shutdown`, which is what a reload emits.
     await rpc("pause")
     const reloadRun = sandbox.run(
       ["run", "-s", "ses_pause_reload", "-m", `${PROVIDER_ID}/pause-model`, "--auto", "say pong"],
@@ -156,6 +156,7 @@ async function main() {
     const sawReloadWait = await waitFor(async () => (await pauseState()).waiting >= 1, 60_000, "the paused model call")
     const postsBeforeReload = cpa.responses().length
     await client.location.reload().catch((error) => console.log(`reload error ${String(error)}`))
+    const reloadResult = await reloadRun
     const reloadReleased = await waitFor(
       async () => {
         const state = await pauseState().catch(() => undefined)
@@ -164,11 +165,17 @@ async function main() {
       60_000,
       "the new generation to report running",
     )
-    const reloadResult = await reloadRun
+    // A grace period, so a retry of the cancelled call would show up here.
+    await sleep(3000)
     record(
-      "a live location reload ends the held pause wait and the session completes",
-      sawReloadWait && reloadReleased && reloadResult.code === 0,
+      "a live location reload cancels the held pause wait instead of sending it",
+      sawReloadWait && reloadReleased && cpa.responses().length === postsBeforeReload,
       `exit ${reloadResult.code}, ${cpa.responses().length - postsBeforeReload} request(s) after the reload`,
+    )
+    record(
+      "the cancelled request ends the session instead of leaving it waiting",
+      reloadResult.code !== null,
+      `exit ${reloadResult.code}`,
     )
     const afterReload = await pauseState()
     record(
