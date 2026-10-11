@@ -20,6 +20,14 @@ export interface FakeHost {
   connectCalls: { integrationID: string; key: string; answer?: Record<string, string> }[]
   rpcRegistrations: { definition: { id: string; methods: Record<string, unknown> }; handlers: Record<string, unknown> }[]
   rpcEvents: { name: string; data: unknown }[]
+  sessionHooks: {
+    name: string
+    callback: (input: unknown) => Promise<void> | void
+    options: unknown
+    disposed: boolean
+  }[]
+  /** Push a host event to every subscriber of `event.subscribe`. */
+  pushEvent: (event: unknown) => void
   logs: string[]
   restoreConsole: () => void
 }
@@ -44,7 +52,36 @@ export function createFakeHost(options: {
   const connectCalls: FakeHost["connectCalls"] = []
   const rpcRegistrations: FakeHost["rpcRegistrations"] = []
   const rpcEvents: FakeHost["rpcEvents"] = []
+  const sessionHooks: FakeHost["sessionHooks"] = []
   const logs: string[] = []
+
+  // A minimal live event stream: `pushEvent` delivers to every subscriber and
+  // an aborted subscription ends, so a test can drive the plugin's event pump.
+  const eventQueue: unknown[] = []
+  const eventWaiters: (() => void)[] = []
+  const pushEvent = (event: unknown) => {
+    eventQueue.push(event)
+    for (const wake of eventWaiters.splice(0)) wake()
+  }
+  const subscribe = (options?: { signal?: AbortSignal }) => {
+    const signal = options?.signal
+    return {
+      [Symbol.asyncIterator]() {
+        return {
+          async next(): Promise<IteratorResult<unknown>> {
+            for (;;) {
+              if (signal?.aborted) return { done: true, value: undefined }
+              if (eventQueue.length > 0) return { done: false, value: eventQueue.shift() }
+              await new Promise<void>((resolve) => {
+                eventWaiters.push(resolve)
+                signal?.addEventListener("abort", () => resolve(), { once: true })
+              })
+            }
+          },
+        }
+      },
+    }
+  }
 
   let nextCredential = credentials.length + 1
 
@@ -52,6 +89,22 @@ export function createFakeHost(options: {
     app: { name: "opencode", version: options.version ?? "2.0.26", channel: "latest" },
     location: { directory: options.location ?? "/fake/location" },
     options: options.options ?? {},
+    session: {
+      hook: async (
+        name: string,
+        callback: (input: unknown) => Promise<void> | void,
+        hookOptions?: unknown,
+      ) => {
+        const entry = { name, callback, options: hookOptions, disposed: false }
+        sessionHooks.push(entry)
+        return {
+          dispose: async () => {
+            entry.disposed = true
+          },
+        }
+      },
+    },
+    event: { subscribe },
     rpc: {
       register: async (
         definition: { id: string; methods: Record<string, unknown> },
@@ -163,6 +216,8 @@ export function createFakeHost(options: {
     connectCalls,
     rpcRegistrations,
     rpcEvents,
+    sessionHooks,
+    pushEvent,
     logs,
     restoreConsole: () => {
       console.log = originals.log

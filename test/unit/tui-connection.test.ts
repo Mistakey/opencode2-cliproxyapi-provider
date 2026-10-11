@@ -67,10 +67,10 @@ describe("matchesLocation", () => {
 function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
   rpc: ConnectionRpc
   statusCalls: () => number
-  emit: (event: { location?: { directory?: string } }) => void
+  emit: (event: { data?: unknown; location?: { directory?: string } }) => void
 } {
   let calls = 0
-  let handler: ((event: { location?: { directory?: string } }) => void) | undefined
+  const handlers = new Set<(event: { data?: unknown; location?: { directory?: string } }) => void>()
   const rpc: ConnectionRpc = {
     status: async () => {
       calls += 1
@@ -78,11 +78,15 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
     },
     verify: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot() }),
     connect: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot({ address: "http://new.test" }) }),
+    pause: async () => ({ paused: true, changedAt: 1, waiting: 0, scope: "location" }),
+    resume: async () => ({ paused: false, changedAt: 2, waiting: 0, scope: "location" }),
+    pauseState: async () => ({ paused: false, changedAt: 1, waiting: 0, scope: "location" }),
+    stats: async () => ({ stats: undefined }),
     events: {
       on: (_name, next) => {
-        handler = next
+        handlers.add(next)
         return () => {
-          handler = undefined
+          handlers.delete(next)
         }
       },
     },
@@ -91,7 +95,9 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
   return {
     rpc,
     statusCalls: () => calls,
-    emit: (event) => handler?.(event),
+    emit: (event) => {
+      for (const handler of handlers) handler(event)
+    },
   }
 }
 

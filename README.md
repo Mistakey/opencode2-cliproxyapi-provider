@@ -22,15 +22,17 @@ Delivered here:
 - connection switching that rebinds the directory to the new connection, with a
   generation guard so a slow request from a replaced connection cannot overwrite
   the newer state
-- a server RPC (`status`, `verify`, `connect` + a `changed` event) and a TUI
-  entry that reads the snapshot, subscribes and runs the wizard without ever
-  talking to CPA itself
+- a server RPC (`status`, `verify`, `connect`, `pause`, `resume`, `pauseState`,
+  `stats`, `sessions`, plus `changed`, `pause.changed` and `stats.changed`
+  events) and a TUI entry that reads the snapshot, subscribes and runs the
+  wizard without ever talking to CPA itself
+- a cancellable pause gate and per-session duration/TPS/token/cache stats
 - credential handling through OpenCode's native key method and credential store
 - project scaffolding, tests, isolated host scripts and this document
 
 Not part of this slice (later tasks): persisted catalog and refresh, Fast/service
-tiers, pause and stats, WebSocket transport and its failure matrix, native
-(provider-side) compaction, real CPA validation.
+tiers, WebSocket transport and its failure matrix, native (provider-side)
+compaction, real CPA validation.
 
 ## Requirements
 
@@ -115,14 +117,18 @@ With the plugin loaded, the TUI entry registers:
 
 | Command | What it does |
 | --- | --- |
-| `/cpa-status` | Reads the snapshot over RPC and shows address, saved key hint, verification state and model count |
+| `/cpa-status` | Reads the snapshot over RPC and shows address, saved key hint, verification state, pause state and model count |
 | `/cpa-connect` | Prompts for the address, reads the key with a **masked** input, verifies, then saves |
+| `/cpa-pause` | Stops the next CPA request; one already in flight completes |
+| `/cpa-resume` | Releases the waiting CPA requests |
+| `/cpa-stats` | Shows this session's effective duration, TPS and token/cache usage |
 
-The prompt footer also carries a short connection state (`CPA 3 models`,
-`CPA saved`, `CPA auth`, `CPA offline`). The TUI talks to the server over RPC
-only; it never contacts CPA and never reads server files, so it also works
-against a remote server. Events are live-only, so the view re-reads the
-snapshot on a reconnect instead of replaying missed events.
+The prompt footer also carries a short state: the connection (`CPA 3 models`,
+`CPA saved`, `CPA auth`, `CPA offline`), `paused` while paused, and the last
+turn's effective duration with its TPS (`2.1s · 9.9 tok/s`). The TUI talks to
+the server over RPC only; it never contacts CPA and never reads server files, so
+it also works against a remote server. Events are live-only, so the view
+re-reads the snapshot on a reconnect instead of replaying missed events.
 
 ## Connection RPC
 
@@ -134,11 +140,50 @@ connection:
 | `status` | `{}` | the connection snapshot |
 | `verify` | `{ address, key? }` | probe result; nothing is saved |
 | `connect` | `{ address, key }` | verifies, saves through the native key method, rebinds models |
+| `pause` | `{}` | pause state; stops the next CPA request |
+| `resume` | `{}` | pause state; releases the waiting requests |
+| `pauseState` | `{}` | pause state without changing it |
+| `stats` | `{ sessionID }` | that session's duration/TPS/token stats, or nothing when unknown |
+| `sessions` | `{}` | every observed session, most recent first |
 
-A `changed` event carries the new snapshot after every committed change. Each
+A `changed` event carries the new snapshot after every committed change, a
+`pause.changed` event carries the new pause state, and a `stats.changed` event
+carries a session's stats when a turn boundary moves (not on every step). Each
 event and call carries a `location`; external clients receive events from every
 location and must filter. The snapshot never contains the key, only
-`(redacted, N chars)`.
+`(redacted, N chars)`; neither does the pause state or the stats.
+
+## Pause and session stats
+
+Pausing stops the *next* CPA request; a request already in flight finishes
+normally. The gate is one promise per waiting model call and holds no timer, so
+a resume is an RPC call that never depends on a model call. Interrupting a
+session drops that session's wait — the host interrupts the request itself, so
+the held request is never sent — and unloading the plugin releases every wait.
+The pause is **not persisted**: a restart or reload starts running, because a
+stored "paused" would silently block the next session. It is scoped to one
+location, and the gate is registered for this provider only, so another
+location or another provider is unaffected.
+
+`/cpa-stats` shows the breakdown and the footer shows the last turn. The same
+data is available over RPC (`stats`, `sessions`).
+
+Measurement rules, asserted by the tests:
+
+| Term | Definition |
+| --- | --- |
+| turn | one host execution: `session.execution.started` until `succeeded`, `failed` or `interrupted`. One prompt with tool continuations is one turn, not several. |
+| effective duration | the turn's wall time minus the time this session spent waiting at the pause gate. Pausing while nothing waits subtracts nothing. |
+| TPS | output tokens / effective seconds for the whole turn. It is **not** pure decode speed: tool rounds and retries are inside the same window. |
+| tokens | summed from `session.step.ended` / `session.step.failed`, keyed by assistant message id |
+| total | `input + output + reasoning + cache.read + cache.write`, the host's own `TokenUsage.total` |
+| retries | counted from `session.retry.scheduled`; a retried step reuses its message id, so its usage is counted once, not once per attempt |
+| sessions | every session id is aggregated on its own; a child (subagent) session is never folded into its parent |
+
+A step that reports no usage contributes no tokens: a missing value is never
+invented. Stats live in the server process: they survive a TUI disconnect (the
+TUI re-reads the snapshot on reconnect) but not a server restart. Title and
+compaction requests are outside the agent-loop turn and are not counted.
 
 ## Model mapping
 
@@ -186,8 +231,31 @@ snapshot after a disconnect.
 bun run smoke:connection
 ```
 
-Both talk to a loopback mock CPA only: no real credential, no real CPA request,
-no cost. `SMOKE_DEBUG=1` also dumps the request sequence of the smoke run.
+`scripts/host-pause.mjs` covers the pause gate in a real host: a paused request
+is held before it is sent, an RPC resume releases it, another provider is not
+gated, interrupting a paused session ends the wait without sending the request,
+and stopping the host while a call is paused ends the wait too.
+
+```bash
+bun run smoke:pause
+```
+
+The same `OPENCODE_CLI`/`OC2CPA_SANDBOX` environment as above applies.
+
+`scripts/host-stats.mjs` covers the measurement: one prompt with a tool
+continuation is one turn with two steps, the tokens are the usage the provider
+reported, the turn carries effective duration and TPS, and pause time inside the
+turn is excluded from the effective duration.
+
+```bash
+bun run smoke:stats
+```
+
+The same `OPENCODE_CLI`/`OC2CPA_SANDBOX` environment as above applies.
+
+All of them talk to a loopback mock CPA only: no real credential, no real CPA
+request, no cost. `SMOKE_DEBUG=1` also dumps the request sequence of the smoke
+run.
 
 ## Development
 
@@ -197,7 +265,7 @@ tests and the host scripts against that `node_modules`.
 ```bash
 npm ci                 # install the locked development dependencies
 bun test               # unit + native-runtime integration tests
-bun test test/unit     # directory parsing, mapping, connection, state, RPC, TUI view
+bun test test/unit     # directory parsing, mapping, connection, state, RPC, pause, stats, TUI view
 bun test test/integration   # real Responses serialization and SSE parsing
 bun run typecheck      # tsc --noEmit
 ```
@@ -211,6 +279,9 @@ drives the real host over its HTTP RPC as a remote client.
 
 - Verified on OpenCode `2.0.26` only; other versions are untested and, outside
   `>=2.0.26 <3`, refused.
+- The pause is runtime state, not a persisted preference, and the stats are
+  in-memory: a server restart clears them.
+- TPS is the whole-turn figure described above, not a decode-speed measurement.
 - With this runtime package the transport defaults to HTTP/SSE for a
   plugin-registered provider; WebSocket behaviour is not validated here.
 - `opencode models` and `model.list` resolve a location of their own and do not

@@ -88,6 +88,8 @@ export const REQUIRED_FUNCTIONS: readonly string[] = [
   "integration.connection.resolve",
   "provider.transform",
   "rpc.register",
+  "session.hook",
+  "event.subscribe",
 ]
 
 /** Plain data the plugin reads during setup. */

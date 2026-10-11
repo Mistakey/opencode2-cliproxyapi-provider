@@ -12,11 +12,18 @@
 
 import { Plugin, usePlugin } from "@opencode/plugin/tui"
 import type { KeyEvent } from "@opentui/core"
-import { createMemo, createSignal, onCleanup, onMount } from "solid-js"
+import { createSignal, onCleanup, onMount } from "solid-js"
 import { DEFAULT_BASE_URL } from "./address"
 import { applyMaskedKey, maskedDisplay } from "./masked-input"
 import { CpaRpc } from "./rpc"
-import { createConnectionView, describeConnection, describeDetail, type ConnectionReport } from "./tui-connection"
+import {
+  createConnectionView,
+  describeDetail,
+  describeFooter,
+  describePause,
+  describeStats,
+  type ConnectionReport,
+} from "./tui-connection"
 
 const PLUGIN_ID = "opencode2-cliproxyapi-provider.tui"
 /** How often the view re-reads the snapshot even without a server push. */
@@ -105,10 +112,9 @@ export default Plugin.define({
       directory,
       onUpdate: () => setRevision((value) => value + 1),
     })
-    const status = createMemo(() => {
-      revision()
-      return { text: describeConnection(view.snapshot(), view.connected()), live: view.connected() }
-    })
+    // The prompt footer tells the view which session is on screen; the stats
+    // dialog reads the same session without a second source of truth.
+    let currentSessionID: string | undefined
 
     void view.refresh()
     const unsubscribe = view.subscribe()
@@ -176,7 +182,7 @@ export default Plugin.define({
             await view.refresh()
             await context.ui.dialog.alert({
               title: "CLIProxyAPI",
-              message: describeDetail(view.snapshot(), view.connected(), view.lastError()),
+              message: describeDetail(view.snapshot(), view.connected(), view.lastError(), view.pause()),
             })
           },
         },
@@ -189,16 +195,69 @@ export default Plugin.define({
           slash: { name: "cpa-connect" },
           run: runWizard,
         },
+        {
+          id: "cliproxyapi.pause",
+          title: "Pause CLIProxyAPI requests",
+          description: "Stop the next CPA request; a request already in flight still completes",
+          group: "CLIProxyAPI",
+          palette: true,
+          slash: { name: "cpa-pause" },
+          run: async () => {
+            const next = await view.pauseRequests()
+            context.ui.toast.show({
+              title: "CLIProxyAPI",
+              message: next ? `Requests ${describePause(next)}` : "Pause failed: the server RPC is unreachable",
+              variant: next ? "warning" : "error",
+            })
+          },
+        },
+        {
+          id: "cliproxyapi.resume",
+          title: "Resume CLIProxyAPI requests",
+          description: "Release the waiting CPA requests; never depends on a model call",
+          group: "CLIProxyAPI",
+          palette: true,
+          slash: { name: "cpa-resume" },
+          run: async () => {
+            const next = await view.resumeRequests()
+            context.ui.toast.show({
+              title: "CLIProxyAPI",
+              message: next ? `Requests ${describePause(next)}` : "Resume failed: the server RPC is unreachable",
+              variant: next ? "success" : "error",
+            })
+          },
+        },
+        {
+          id: "cliproxyapi.stats",
+          title: "CLIProxyAPI session stats",
+          description: "Show this session's effective duration, TPS and token/cache usage",
+          group: "CLIProxyAPI",
+          palette: true,
+          slash: { name: "cpa-stats" },
+          run: async () => {
+            const sessionID = currentSessionID
+            await view.reloadStats(sessionID)
+            await context.ui.dialog.alert({
+              title: "CLIProxyAPI stats",
+              message: describeStats(view.stats(sessionID)),
+            })
+          },
+        },
       ],
     }))
 
     const removeSlot = context.ui.slot({
       append: "prompt.footer.status",
-      render: () => (
-        <text fg={status().live ? context.theme.text.muted : context.theme.text.feedback.error.base}>
-          {status().text}
-        </text>
-      ),
+      render: (slotInput) => {
+        // Reading the revision makes the footer follow every refresh; the slot
+        // input supplies the session whose turn is on screen.
+        revision()
+        currentSessionID = slotInput.sessionID
+        const text = describeFooter(view.snapshot(), view.connected(), view.pause(), view.stats(slotInput.sessionID))
+        return (
+          <text fg={view.connected() ? context.theme.text.muted : context.theme.text.feedback.error.base}>{text}</text>
+        )
+      },
     })
 
     return () => {

@@ -34,7 +34,9 @@
     "test:integration": "bun test test/integration",
     "typecheck": "tsc --noEmit",
     "smoke:host": "bun scripts/host-smoke.mjs",
-    "smoke:connection": "bun scripts/host-connection.mjs"
+    "smoke:connection": "bun scripts/host-connection.mjs",
+    "smoke:pause": "bun scripts/host-pause.mjs",
+    "smoke:stats": "bun scripts/host-stats.mjs"
   },
   "opencode": {
     "supported": ">=2.0.26 <3",
