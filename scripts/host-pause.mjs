@@ -10,8 +10,9 @@
  *   2. `resume` releases it without depending on a model call
  *   3. pausing the CPA provider does not gate another provider
  *   4. interrupting a paused session ends the wait and never sends the request
- *   5. stopping the host while a call is paused ends the wait without a request
- *   6. the fictional key never reaches the host log
+ *   5. reloading the location ends the held wait without orphaning it
+ *   6. stopping the host while a call is paused ends the wait without a request
+ *   7. the fictional key never reaches the host log
  *
  * Nothing here talks to a real CPA and no real credential is used.
  *
@@ -144,7 +145,55 @@ async function main() {
     await prompt
     await rpc("resume")
 
-    // 5: stopping the host while a call is paused ends the wait.
+    // 5: a live location reload ends the held wait instead of orphaning it.
+    //     The host does not settle an in-flight hook itself; the plugin ends it
+    //     on `location.shutdown`, which is what a reload emits.
+    await rpc("pause")
+    const reloadRun = sandbox.run(
+      ["run", "-s", "ses_pause_reload", "-m", `${PROVIDER_ID}/pause-model`, "--auto", "say pong"],
+      { cwd: location, timeoutMs: 90_000 },
+    )
+    const sawReloadWait = await waitFor(async () => (await pauseState()).waiting >= 1, 60_000, "the paused model call")
+    const postsBeforeReload = cpa.responses().length
+    await client.location.reload().catch((error) => console.log(`reload error ${String(error)}`))
+    const reloadReleased = await waitFor(
+      async () => {
+        const state = await pauseState().catch(() => undefined)
+        return state?.paused === false && state?.waiting === 0
+      },
+      60_000,
+      "the new generation to report running",
+    )
+    const reloadResult = await reloadRun
+    record(
+      "a live location reload ends the held pause wait and the session completes",
+      sawReloadWait && reloadReleased && reloadResult.code === 0,
+      `exit ${reloadResult.code}, ${cpa.responses().length - postsBeforeReload} request(s) after the reload`,
+    )
+    const afterReload = await pauseState()
+    record(
+      "the reloaded location starts running and does not inherit the old pause",
+      afterReload?.paused === false && afterReload?.waiting === 0,
+      JSON.stringify(afterReload),
+    )
+
+    // The reloaded location's gate is a live, separate instance.
+    await rpc("pause")
+    const afterReloadRun = sandbox.run(
+      ["run", "-s", "ses_pause_after_reload", "-m", `${PROVIDER_ID}/pause-model`, "--auto", "say pong"],
+      { cwd: location, timeoutMs: 90_000 },
+    )
+    const sawSecondWait = await waitFor(async () => (await pauseState()).waiting >= 1, 60_000, "the reloaded gate")
+    const postsBeforeSecondResume = cpa.responses().length
+    await rpc("resume")
+    const afterReloadResult = await afterReloadRun
+    record(
+      "the reloaded location's pause gate still holds and releases",
+      sawSecondWait && afterReloadResult.code === 0 && cpa.responses().length > postsBeforeSecondResume,
+      `exit ${afterReloadResult.code}`,
+    )
+
+    // 6: stopping the host while a call is paused ends the wait.
     await rpc("pause")
     const stuck = sandbox.run(
       ["run", "-s", "ses_pause_unload", "-m", `${PROVIDER_ID}/pause-model`, "--auto", "say pong"],
@@ -167,7 +216,7 @@ async function main() {
     )
     await Promise.race([stuck, sleep(20_000)])
 
-    // 6: no credential material in the host log.
+    // 7: no credential material in the host log.
     const log = sandbox.hostLog()
     record("the host log exists and holds no key material", log.length > 0 && !log.includes(FAKE_KEY))
   } finally {

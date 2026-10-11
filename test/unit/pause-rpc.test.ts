@@ -225,6 +225,36 @@ describe("pause gate over the server RPC", () => {
     expect(turn.pausedMs).toBeLessThanOrEqual(turn.effectiveMs + turn.pausedMs)
   })
 
+  test("a location shutdown ends a held wait and stops the stream", async () => {
+    mock = await startMockCpa({ models: [{ slug: "a" }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+    const hook = host.sessionHooks[0]!
+
+    await handlers.pause({})
+    let sent = false
+    const pending = Promise.resolve(hook.callback({ sessionID: "ses_reload", kind: "primary" })).then(() => {
+      sent = true
+    })
+    await sleep(0)
+    expect((await handlers.pauseState({})).waiting).toBe(1)
+
+    host.pushEvent(hostEvent("location.shutdown", {}))
+    await pending
+    expect(sent).toBe(true)
+    expect(await handlers.pauseState({})).toMatchObject({ paused: false, waiting: 0 })
+
+    // The old generation's stream stopped: a later event is not observed.
+    const published = host.rpcEvents.filter((entry) => entry.name === "stats.changed").length
+    host.pushEvent(hostEvent("session.execution.started", { sessionID: "ses_after" }))
+    await sleep(0)
+    await sleep(0)
+    expect(host.rpcEvents.filter((entry) => entry.name === "stats.changed").length).toBe(published)
+    expect(await handlers.stats({ sessionID: "ses_after" })).toEqual({})
+  })
+
   test("unload releases the wait and disposes the hook", async () => {
     mock = await startMockCpa({ models: [{ slug: "a" }] })
     host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })

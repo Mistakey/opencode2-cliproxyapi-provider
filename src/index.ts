@@ -311,13 +311,23 @@ async function setupConnection(ctx: Context) {
   )
 
   // Session events feed the stats and release the waits of a cancelled session.
+  // `location.shutdown` is the host's unload signal for this generation: the
+  // host does not settle an in-flight hook by itself, so end the held waits and
+  // stop the stream here instead of leaving them to a cleanup the host does not
+  // call on a live reload.
   const subscription = new AbortController()
   void (async () => {
     try {
       for await (const event of ctx.event.subscribe({ signal: subscription.signal })) {
+        const type = (event as { type?: string }).type
+        if (type === "location.shutdown") {
+          pause.close()
+          subscription.abort()
+          break
+        }
         const observed = stats.observe(event as SessionEventLike)
         if (!observed) continue
-        if ((event as { type?: string }).type === "session.execution.interrupted") {
+        if (type === "session.execution.interrupted") {
           pause.cancel(observed.sessionID)
         }
         if (observed.boundary) {

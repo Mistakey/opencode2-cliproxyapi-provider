@@ -43,6 +43,7 @@ export class PauseGate {
   readonly #onWaitStart: ((sessionID: string) => void) | undefined
   readonly #onWaitEnd: ((sessionID: string) => void) | undefined
   #paused = false
+  #closed = false
   #changedAt: number
   #next = 1
   readonly #waiters = new Map<number, Waiter>()
@@ -69,7 +70,7 @@ export class PauseGate {
 
   /** Pause subsequent CPA requests. Requests already in flight are untouched. */
   pause(): PauseState {
-    if (!this.#paused) {
+    if (!this.#paused && !this.#closed) {
       this.#paused = true
       this.#changedAt = this.#now()
     }
@@ -93,7 +94,7 @@ export class PauseGate {
    * `cancel`) never resolves, because the host has already abandoned the call.
    */
   wait(sessionID: string): Promise<void> {
-    if (!this.#paused) return Promise.resolve()
+    if (this.#closed || !this.#paused) return Promise.resolve()
     const id = this.#next
     this.#next += 1
     return new Promise<void>((resolve) => {
@@ -113,6 +114,17 @@ export class PauseGate {
 
   /** Unload: release every wait so no plugin state outlives the instance. */
   releaseAll(): number {
+    return this.#settle("release")
+  }
+
+  /**
+   * The location is being replaced (the host's `location.shutdown`). End every
+   * wait now and refuse new ones: the host disposes this generation's hook, so
+   * a wait created after this point would never be released.
+   */
+  close(): number {
+    this.#closed = true
+    this.#paused = false
     return this.#settle("release")
   }
 

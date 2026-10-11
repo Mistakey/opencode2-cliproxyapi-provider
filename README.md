@@ -165,6 +165,16 @@ stored "paused" would silently block the next session. It is scoped to one
 location, and the gate is registered for this provider only, so another
 location or another provider is unaffected.
 
+Unload has its own rule. The host replaces a plugin generation on a live
+`location.reload()`: it emits `location.shutdown` to the old generation, but it
+does not call the cleanup returned by `setup` and does not settle an in-flight
+hook itself. A pending pause wait would therefore be orphaned. The plugin ends
+its held waits and stops its event subscription on `location.shutdown` instead,
+so a reload while a request is paused **releases** that request — it is sent and
+the session finishes, rather than being cancelled or left waiting — and the
+replaced generation stops receiving events. A reload therefore starts running,
+like a restart.
+
 `/cpa-stats` shows the breakdown and the footer shows the last turn. The same
 data is available over RPC (`stats`, `sessions`).
 
@@ -234,7 +244,8 @@ bun run smoke:connection
 `scripts/host-pause.mjs` covers the pause gate in a real host: a paused request
 is held before it is sent, an RPC resume releases it, another provider is not
 gated, interrupting a paused session ends the wait without sending the request,
-and stopping the host while a call is paused ends the wait too.
+a live `location.reload()` ends the held wait and the reloaded location's gate
+still works, and stopping the host while a call is paused ends the wait too.
 
 ```bash
 bun run smoke:pause

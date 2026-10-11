@@ -86,6 +86,28 @@ describe("PauseGate", () => {
     expect(state.waiting).toBe(0)
   })
 
+  test("close releases every wait and refuses new ones", async () => {
+    const gate = new PauseGate()
+    gate.pause()
+    let resolved = false
+    const waiting = gate.wait("ses_a").then(() => {
+      resolved = true
+    })
+    expect(gate.read().waiting).toBe(1)
+
+    expect(gate.close()).toBe(1)
+    await waiting
+    expect(resolved).toBe(true)
+    expect(gate.read().waiting).toBe(0)
+    expect(gate.read().paused).toBe(false)
+
+    // After the location shut down, a late call is not gated and pause is inert.
+    await gate.wait("ses_a")
+    expect(gate.read().waiting).toBe(0)
+    expect(gate.pause().paused).toBe(false)
+    expect(gate.read().waiting).toBe(0)
+  })
+
   test("changedAt only moves on a real transition", () => {
     let now = 100
     const gate = new PauseGate({ now: () => now })
