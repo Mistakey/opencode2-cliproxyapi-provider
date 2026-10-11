@@ -4,10 +4,15 @@ import {
   CatalogError,
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_OUTPUT_TOKENS,
+  FAST_SERVICE_TIER,
+  fastEffectiveCount,
   fetchCatalog,
   parseCatalogPayload,
+  supportsFastServiceTier,
   toModelInfo,
+  toModelInfos,
 } from "../../src/catalog"
+import { buildModelsDevCatalog, matchModelCost, toModelCost } from "../../src/cost"
 
 const providerID = Provider.ID.make("cliproxyapi")
 
@@ -64,6 +69,25 @@ describe("parseCatalogPayload", () => {
   test("marks hidden entries instead of dropping them", () => {
     const entries = parseCatalogPayload({ models: [{ slug: "hidden-one", visibility: "hide" }] })
     expect(entries).toEqual([{ id: "hidden-one", hidden: true }])
+  })
+
+  test("reads service_tiers as strings or objects and ignores additional_speed_tiers", () => {
+    const entries = parseCatalogPayload({
+      models: [
+        { slug: "fast-strings", service_tiers: ["priority", "flex"] },
+        { slug: "fast-objects", service_tiers: [{ id: "priority", name: "Priority" }, { name: "flex" }] },
+        // The reference plugin does not treat additional_speed_tiers as capability.
+        { slug: "speed-only", additional_speed_tiers: ["priority"] },
+        { slug: "no-tiers" },
+        { slug: "empty-tiers", service_tiers: [] },
+      ],
+    })
+    expect(entries[0]?.serviceTiers).toEqual(["priority", "flex"])
+    expect(entries[1]?.serviceTiers).toEqual(["priority", "flex"])
+    expect(entries[2]?.serviceTiers).toBeUndefined()
+    expect(entries[3]?.serviceTiers).toBeUndefined()
+    expect(entries[4]?.serviceTiers).toBeUndefined()
+    expect(entries.map(supportsFastServiceTier)).toEqual([true, true, false, false, false])
   })
 
   test("keeps the first entry for a duplicated id and skips entries without one", () => {
@@ -160,6 +184,44 @@ describe("toModelInfo", () => {
     expect(model.variants[0]?.settings).toEqual({ reasoningEffort: "low" })
     expect(model.limit).toEqual({ context: 32_000, output: 32_000 })
     expect(model.enabled).toBe(false)
+  })
+
+  test("asks for priority only for a declared-capable model with Fast on", () => {
+    const capable = { id: "capable", serviceTiers: ["priority"], reasoningLevels: ["high"] }
+    const plain = { id: "plain", reasoningLevels: ["high"] }
+
+    expect(toModelInfo(providerID, capable).settings).toBeUndefined()
+    expect(toModelInfo(providerID, capable, { fast: false }).settings).toBeUndefined()
+    expect(toModelInfo(providerID, capable, { fast: true }).settings).toEqual({ serviceTier: FAST_SERVICE_TIER })
+    // No declared service tiers: Fast must not inject the parameter.
+    expect(toModelInfo(providerID, plain, { fast: true }).settings).toBeUndefined()
+
+    // Fast never touches the reasoning variants.
+    const model = toModelInfo(providerID, capable, { fast: true })
+    expect(model.variants.map((variant) => variant.settings)).toEqual([{ reasoningEffort: "high" }])
+    expect(fastEffectiveCount([capable, plain], true)).toBe(1)
+    expect(fastEffectiveCount([capable, plain], false)).toBe(0)
+  })
+
+  test("attaches a matched price estimate and leaves it out when there is none", () => {
+    const catalog = buildModelsDevCatalog({
+      openai: { models: { "gpt-5.2": { cost: { input: 1.25, output: 10 } } } },
+    })
+    const withCost = toModelInfo(providerID, { id: "gpt-5.2" }, {
+      cost: (entry) => {
+        const cost = matchModelCost(entry.id, catalog)
+        return cost ? toModelCost(cost) : undefined
+      },
+    })
+    expect(withCost.cost as unknown as unknown[]).toEqual([{ input: 1.25, output: 10, cache: { read: 0, write: 0 } }])
+
+    const unknown = toModelInfos(providerID, [{ id: "gpt-5.2" }, { id: "unknown-model" }], {
+      cost: (entry) => {
+        const cost = matchModelCost(entry.id, catalog)
+        return cost ? toModelCost(cost) : undefined
+      },
+    })
+    expect(unknown.map((model) => model.cost.length)).toEqual([1, 0])
   })
 })
 

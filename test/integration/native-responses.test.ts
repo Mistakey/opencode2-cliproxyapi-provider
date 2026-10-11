@@ -12,6 +12,8 @@ import { afterEach, describe, expect, test } from "bun:test"
 import * as AI from "@opencode/ai/promise"
 import { Media, Message, ToolCallPart, ToolResultPart } from "@opencode/ai"
 import { model } from "@opencode/ai/providers/openai-compatible/responses"
+import { OpenAICompatibleResponses } from "@opencode/ai/protocols/openai-compatible-responses"
+import { OpenResponsesChannel } from "@opencode/ai/protocols/open-responses-channel"
 import { resolveEndpoints } from "../../src/address"
 import { fetchCatalog } from "../../src/catalog"
 import { SUMMARY_PROMPT_MARKER, startMockCpa, textReply, toolCallReply } from "../support/mock-cpa.mjs"
@@ -46,9 +48,42 @@ async function collect(stream: AsyncIterable<Record<string, unknown>>) {
   return events
 }
 
-function languageModel(url: string, modelID = "gpt-5.2-codex") {
+function languageModel(url: string, modelID = "gpt-5.2-codex", options: Record<string, unknown> = {}) {
   const endpoints = resolveEndpoints(url)
-  return { endpoints, languageModel: model(modelID, { baseURL: endpoints.baseURL, apiKey: API_KEY }) }
+  return { endpoints, languageModel: model(modelID, { baseURL: endpoints.baseURL, apiKey: API_KEY, ...options }) }
+}
+
+/**
+ * Build a WebSocket `response.create` frame with the native channel serializer.
+ * No socket is opened: `prepare` produces the frame the runtime would send, and
+ * the driver exposes it without executing the connection.
+ */
+async function webSocketFrame(providerOptions: Record<string, unknown>, baseURL = "http://127.0.0.1:1/v1") {
+  const route = OpenAICompatibleResponses.route.with({ provider: "cliproxyapi", endpoint: { baseURL } })
+  const request = ai.llm.request({
+    model: route.model({ id: "gpt-5.2-codex" }),
+    prompt: "hi",
+    providerOptions,
+  })
+  const body = await ai.run(route.body.from(request))
+  // `Body` is not inferable from the transport options, so bind it to the body
+  // the native serializer produced.
+  const transport = OpenResponsesChannel.transport<typeof body>({ id: "cliproxyapi", name: "CLIProxyAPI" })
+  type PrepareInput = Parameters<typeof transport.prepare>[0]
+  const prepared = await ai.run(
+    transport.prepare({
+      body,
+      request,
+      endpoint: route.endpoint,
+      auth: route.auth,
+      encodeBody: (value) => JSON.stringify(value),
+      // `prepare` only needs the executor to be present; the frame is read from
+      // the driver before any connection is made.
+      webSocket: {} as unknown as NonNullable<PrepareInput["webSocket"]>,
+    }),
+  )
+  const create = await ai.run(prepared.channel!.driver.create(undefined))
+  return JSON.parse(create.message) as Record<string, unknown>
 }
 
 describe("native Responses runtime against the mock CPA", () => {
@@ -238,5 +273,61 @@ describe("native Responses runtime against the mock CPA", () => {
     expect(failure).toBeInstanceOf(Error)
     expect(String(failure)).toContain("invalid key")
     expect(mock.responses()).toHaveLength(1)
+  })
+
+  test("sends the semantic serviceTier as service_tier on every request kind", async () => {
+    mock = await startMockCpa({ responses: textReply("pong") })
+    const { languageModel: lm } = languageModel(mock.url, "gpt-5.2-codex", {
+      serviceTier: "priority",
+      reasoningEffort: "high",
+    })
+
+    // primary conversation
+    await collect(ai.llm.stream({ model: lm, prompt: "say pong" }) as AsyncIterable<Record<string, unknown>>)
+    // summary/compaction request, as OpenCode builds it
+    await collect(
+      ai.llm.stream({
+        model: lm,
+        messages: [Message.user("earlier turn"), Message.user(SUMMARY_PROMPT_MARKER + "\n<template></template>")],
+      }) as AsyncIterable<Record<string, unknown>>,
+    )
+    // title/generate-shaped request: a system instruction and one short prompt
+    await collect(
+      ai.llm.stream({ model: lm, system: "You are a title generator", prompt: "name this session" }) as AsyncIterable<
+        Record<string, unknown>
+      >,
+    )
+
+    const requests = mock.responses()
+    expect(requests).toHaveLength(3)
+    for (const request of requests) {
+      expect(request.json.service_tier).toBe("priority")
+      expect(request.json.reasoning).toEqual({ effort: "high" })
+    }
+    expect(JSON.stringify(requests[1]!.json.input)).toContain(SUMMARY_PROMPT_MARKER)
+  })
+
+  test("omits service_tier when Fast is off", async () => {
+    mock = await startMockCpa({ responses: textReply("pong") })
+    const { languageModel: lm } = languageModel(mock.url)
+
+    await collect(ai.llm.stream({ model: lm, prompt: "say pong" }) as AsyncIterable<Record<string, unknown>>)
+    expect(mock.responses()[0]!.json.service_tier).toBeUndefined()
+    expect(mock.responses()[0]!.json.reasoning).toBeUndefined()
+  })
+
+  test("carries the same priority parameter in a native WebSocket response.create frame", async () => {
+    const on = await webSocketFrame({ serviceTier: "priority", reasoningEffort: "high" })
+    expect(on.type).toBe("response.create")
+    expect(on.service_tier).toBe("priority")
+    expect(on.reasoning).toEqual({ effort: "high" })
+    // The channel frame drops the HTTP-only streaming flags.
+    expect(on.stream).toBeUndefined()
+    expect(on.stream_options).toBeUndefined()
+
+    const off = await webSocketFrame({})
+    expect(off.type).toBe("response.create")
+    expect(off.service_tier).toBeUndefined()
+    expect(off.model).toBe("gpt-5.2-codex")
   })
 })

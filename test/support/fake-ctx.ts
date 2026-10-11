@@ -40,6 +40,7 @@ export function createFakeHost(options: {
   omit?: string[]
   credentials?: FakeCredential[]
   location?: string
+  storage?: Record<string, unknown>
 } = {}): FakeHost {
   const integrations: FakeHost["integrations"] = []
   const credentials: FakeCredential[] = options.credentials ?? []
@@ -47,8 +48,8 @@ export function createFakeHost(options: {
   const connectCalls: FakeHost["connectCalls"] = []
   const rpcRegistrations: FakeHost["rpcRegistrations"] = []
   const rpcEvents: FakeHost["rpcEvents"] = []
+  const storage = new Map<string, unknown>(Object.entries(options.storage ?? {}))
   const logs: string[] = []
-  const storage = new Map<string, unknown>()
   const sessionHooks: FakeHost["sessionHooks"] = []
 
   let nextCredential = credentials.length + 1
@@ -69,6 +70,15 @@ export function createFakeHost(options: {
         }
         rpcRegistrations.push({ definition, handlers })
         return { dispose: async () => undefined, events }
+      },
+    },
+    storage: {
+      get: async (key: string) => storage.get(key),
+      set: async (key: string, value: unknown) => {
+        storage.set(key, value)
+      },
+      remove: async (key: string) => {
+        storage.delete(key)
       },
     },
     integration: {
@@ -144,15 +154,6 @@ export function createFakeHost(options: {
         }
         callback(editor)
         return { dispose: async () => undefined }
-      },
-    },
-    storage: {
-      get: async (key: string) => storage.get(key),
-      set: async (key: string, value: unknown) => {
-        storage.set(key, value)
-      },
-      remove: async (key: string) => {
-        storage.delete(key)
       },
     },
     session: {

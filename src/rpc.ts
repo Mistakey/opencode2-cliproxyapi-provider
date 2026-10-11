@@ -39,6 +39,9 @@ export const snapshotSchema = {
     catalogStaleModels: { type: "integer" },
     catalogStaleIds: { type: "array", items: { type: "string" } },
     catalogFromCache: { type: "boolean" },
+    fastEnabled: { type: "boolean" },
+    fastEffectiveModels: { type: "integer" },
+    costModels: { type: "integer" },
     generation: { type: "integer" },
     updatedAt: { type: "number" },
   },
@@ -49,6 +52,8 @@ export const snapshotSchema = {
     "keyHint",
     "keySaved",
     "verified",
+    "fastEnabled",
+    "fastEffectiveModels",
     "generation",
     "updatedAt",
   ],
@@ -72,6 +77,17 @@ const staleSchema = {
   type: "object",
   properties: { modelID: { type: "string" } },
   required: ["modelID"],
+  additionalProperties: false,
+} as const
+
+const fastResultSchema = {
+  type: "object",
+  properties: {
+    ok: { type: "boolean" },
+    message: { type: "string" },
+    snapshot: snapshotSchema,
+  },
+  required: ["ok", "snapshot"],
   additionalProperties: false,
 } as const
 
@@ -113,6 +129,16 @@ export const CpaRpc = Rpc.define({
         additionalProperties: false,
       },
       output: resultSchema,
+    },
+    /** Persist the Fast preference. The provider registry is rebuilt at the next location boot. */
+    setFast: {
+      input: {
+        type: "object",
+        properties: { enabled: { type: "boolean" } },
+        required: ["enabled"],
+        additionalProperties: false,
+      },
+      output: fastResultSchema,
     },
   },
   events: {

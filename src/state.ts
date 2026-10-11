@@ -95,6 +95,12 @@ export type ConnectionSnapshot = {
   readonly catalogStaleIds?: readonly string[]
   /** Models currently come from a matching persisted cache, not a live read. */
   readonly catalogFromCache?: boolean
+  /** Persisted Fast preference. */
+  readonly fastEnabled: boolean
+  /** Registered models that currently send the priority parameter. */
+  readonly fastEffectiveModels: number
+  /** Registered models whose price is a models.dev estimate. */
+  readonly costModels?: number
   /** Increments on every connection-changing attempt. */
   readonly generation: number
   readonly updatedAt: number
@@ -140,6 +146,20 @@ export class ConnectionState {
   /** Apply an update unless a newer connection change already superseded it. */
   commit(generation: number, update: Partial<Omit<ConnectionSnapshot, "generation" | "updatedAt">>): boolean {
     if (!this.isCurrent(generation)) return false
+    this.#apply(update)
+    return true
+  }
+
+  /**
+   * Apply a non-connection update (the Fast preference, price estimates). It is
+   * not tied to the generation guard: it describes the active connection, not a
+   * candidate one.
+   */
+  patch(update: ConnectionUpdate): void {
+    this.#apply(update)
+  }
+
+  #apply(update: Partial<Omit<ConnectionSnapshot, "generation" | "updatedAt">>): void {
     // A field explicitly set to `undefined` clears the previous value and is left
     // out of the snapshot, so the RPC output never carries an `undefined` field.
     const next: Record<string, unknown> = { ...this.#snapshot }
@@ -150,7 +170,6 @@ export class ConnectionState {
     next.generation = this.#generation
     next.updatedAt = this.#now()
     this.#snapshot = next as ConnectionSnapshot
-    return true
   }
 
   read(): ConnectionSnapshot {

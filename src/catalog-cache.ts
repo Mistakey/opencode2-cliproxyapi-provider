@@ -132,6 +132,11 @@ function parseEntry(value: unknown): CatalogEntry | undefined {
   if (Array.isArray(value.reasoningLevels) && value.reasoningLevels.every((item) => typeof item === "string")) {
     entry.reasoningLevels = value.reasoningLevels
   }
+  // Declared service tiers are part of the Fast capability; a cached directory
+  // must not lose them, or a restored model would silently stop asking for priority.
+  if (Array.isArray(value.serviceTiers) && value.serviceTiers.every((item) => typeof item === "string")) {
+    entry.serviceTiers = value.serviceTiers
+  }
   if (typeof value.hidden === "boolean") entry.hidden = value.hidden
   return entry as unknown as CatalogEntry
 }

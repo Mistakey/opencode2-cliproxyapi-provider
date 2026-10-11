@@ -138,7 +138,7 @@ async function main() {
     `${JSON.stringify(
       {
         $schema: "https://opencode.ai/config.json",
-        plugins: [{ package: join(ROOT, "src"), options: { baseURL: mockA.url } }],
+        plugins: [{ package: join(ROOT, "src"), options: { baseURL: mockA.url, modelsDev: false } }],
       },
       null,
       2,

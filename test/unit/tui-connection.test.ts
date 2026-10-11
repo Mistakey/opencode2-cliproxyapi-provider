@@ -21,6 +21,8 @@ function snapshot(overrides: Partial<ConnectionSnapshot> = {}): ConnectionSnapsh
     verified: "ok",
     verifyKind: "ok",
     catalogModels: 2,
+    fastEnabled: false,
+    fastEffectiveModels: 0,
     generation: 3,
     updatedAt: 1,
     ...overrides,
@@ -40,17 +42,33 @@ describe("describeConnection", () => {
   test("separates offline, unconfigured, saved and verified", () => {
     expect(describeConnection(snapshot(), false)).toBe("CPA offline")
     expect(describeConnection(undefined, true)).toBe("CPA not configured")
-    expect(describeConnection(snapshot({ verified: "unknown" }), true)).toBe("CPA saved")
-    expect(describeConnection(snapshot({ verified: "unknown", keySaved: false }), true)).toBe("CPA not configured")
-    expect(describeConnection(snapshot({ catalogModels: 0 }), true)).toBe("CPA empty")
-    expect(describeConnection(snapshot({ catalogModels: 5 }), true)).toBe("CPA 5 models")
-    expect(describeConnection(snapshot({ verified: "failed", verifyKind: "auth" }), true)).toBe("CPA 2 models · auth")
-    expect(describeConnection(snapshot({ verified: "failed", verifyKind: "auth", catalogModels: 0 }), true)).toBe("CPA auth")
+    expect(describeConnection(snapshot({ verified: "unknown" }), true)).toBe("CPA saved · Fast off")
+    expect(describeConnection(snapshot({ verified: "unknown", keySaved: false }), true)).toBe(
+      "CPA not configured · Fast off",
+    )
+    expect(describeConnection(snapshot({ catalogModels: 0 }), true)).toBe("CPA empty · Fast off")
+    expect(describeConnection(snapshot({ catalogModels: 5 }), true)).toBe("CPA 5 models · Fast off")
+    expect(describeConnection(snapshot({ verified: "failed", verifyKind: "auth" }), true)).toBe(
+      "CPA 2 models · auth · Fast off",
+    )
+    expect(describeConnection(snapshot({ verified: "failed", verifyKind: "auth", catalogModels: 0 }), true)).toBe(
+      "CPA auth · Fast off",
+    )
+  })
+
+  test("separates the Fast preference from its effect", () => {
+    expect(describeConnection(snapshot({ fastEnabled: true, fastEffectiveModels: 3 }), true)).toBe(
+      "CPA 2 models · Fast on (3)",
+    )
+    // The preference is on but the directory declared no capable model.
+    expect(describeConnection(snapshot({ fastEnabled: true, fastEffectiveModels: 0 }), true)).toBe(
+      "CPA 2 models · Fast on (no capable model)",
+    )
   })
 
   test("shows cached, stale and last-refresh state", () => {
-    expect(describeConnection(snapshot({ catalogFromCache: true }), true)).toBe("CPA 2 models (cached)")
-    expect(describeConnection(snapshot({ catalogStaleModels: 1 }), true)).toBe("CPA 2 models · 1 stale")
+    expect(describeConnection(snapshot({ catalogFromCache: true }), true)).toBe("CPA 2 models (cached) · Fast off")
+    expect(describeConnection(snapshot({ catalogStaleModels: 1 }), true)).toBe("CPA 2 models · 1 stale · Fast off")
     const detail = describeDetail(
       snapshot({
         catalogFromCache: true,
@@ -67,10 +85,16 @@ describe("describeConnection", () => {
   })
 
   test("the detail view never contains key material", () => {
-    const detail = describeDetail(snapshot({ addressSource: "wizard", keySource: "wizard" }), true, undefined)
+    const detail = describeDetail(
+      snapshot({ addressSource: "wizard", keySource: "wizard", fastEnabled: true, fastEffectiveModels: 1, costModels: 2 }),
+      true,
+      undefined,
+    )
     expect(detail).toContain("address:")
     expect(detail).toContain("saved: yes")
     expect(detail).toContain("verified: ok")
+    expect(detail).toContain("fast: on (effective on 1 model(s))")
+    expect(detail).toContain("models.dev estimate for 2 model(s), not a CPA bill")
     expect(detail).not.toContain("sk-")
   })
 })
@@ -101,6 +125,10 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
     verify: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot() }),
     connect: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot({ address: "http://new.test" }) }),
     refresh: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot({ catalogFetchedAt: 1 }) }),
+    setFast: async ({ enabled }) => ({
+      ok: true,
+      snapshot: snapshot({ fastEnabled: enabled, fastEffectiveModels: enabled ? 2 : 0 }),
+    }),
     events: {
       on: (name: "changed" | "stale", next: (event: { location?: { directory?: string }; data?: unknown }) => void) => {
         if (name === "changed") handler = next
@@ -187,6 +215,34 @@ describe("createConnectionView", () => {
     const saved = await view.connect("http://new.test", "sk-fake")
     expect(saved.ok).toBe(true)
     expect(view.snapshot()?.address).toBe("http://new.test")
+  })
+
+  test("persists Fast, reloads the location and re-reads the authoritative snapshot", async () => {
+    const fake = fakeRpc()
+    const order: string[] = []
+    const view = createConnectionView({
+      rpc: {
+        ...fake.rpc,
+        setFast: async ({ enabled }) => {
+          order.push(`set:${enabled}`)
+          return { ok: true, snapshot: snapshot({ fastEnabled: enabled, fastEffectiveModels: 0 }) }
+        },
+        status: async () => {
+          order.push("status")
+          return snapshot({ fastEnabled: true, fastEffectiveModels: 2, generation: 4 })
+        },
+      },
+      directory: "/work/one",
+      reload: async () => {
+        order.push("reload")
+      },
+    })
+
+    const report = await view.setFast(true)
+    expect(report.ok).toBe(true)
+    // The reload is what makes the persisted preference reach the provider registry.
+    expect(order).toEqual(["set:true", "reload", "status"])
+    expect(view.snapshot()?.fastEffectiveModels).toBe(2)
   })
 
   test("ignores an RPC response that is not a report", async () => {

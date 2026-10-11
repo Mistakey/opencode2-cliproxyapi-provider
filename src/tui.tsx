@@ -26,7 +26,7 @@ type TuiContext = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0]
 
 function reportMessage(report: ConnectionReport): string {
   const detail = report.message ? ` — ${report.message}` : ""
-  return `${report.kind}${detail}`
+  return `${report.kind ?? "error"}${detail}`
 }
 
 /** Masked key entry. Resolves with the key, or `undefined` when cancelled. */
@@ -103,6 +103,9 @@ export default Plugin.define({
     const view = createConnectionView({
       rpc: context.client.rpc(CpaRpc),
       directory,
+      // A persisted preference is recompiled when the location boots; the
+      // toggle asks the host to reload so the change reaches the wire at once.
+      reload: () => context.client.location.reload(),
       onUpdate: () => setRevision((value) => value + 1),
       // The server keeps a model that disappeared from the directory for a
       // while; selecting it warns instead of promising the upstream serves it.
@@ -217,6 +220,39 @@ export default Plugin.define({
           palette: true,
           slash: { name: "cpa-connect" },
           run: runWizard,
+        },
+        {
+          id: "cliproxyapi.fast",
+          title: "Toggle CLIProxyAPI Fast",
+          description: "Ask models that declare service tiers for the priority tier",
+          group: "CLIProxyAPI",
+          palette: true,
+          slash: { name: "cpa-fast" },
+          run: async () => {
+            await view.refresh()
+            const next = !(view.snapshot()?.fastEnabled ?? false)
+            const report = await view.setFast(next)
+            if (!report.ok) {
+              context.ui.toast.show({
+                title: "CLIProxyAPI",
+                message: `Fast not changed: ${reportMessage(report)}`,
+                variant: "error",
+                duration: 8000,
+              })
+              return
+            }
+            const snapshot = view.snapshot()
+            const effective = snapshot?.fastEffectiveModels ?? 0
+            context.ui.toast.show({
+              title: "CLIProxyAPI",
+              message:
+                `Fast ${snapshot?.fastEnabled ? "on" : "off"} · ` +
+                (snapshot?.fastEnabled && effective === 0
+                  ? "no capable model in the directory"
+                  : `effective on ${effective} model(s)`),
+              variant: "success",
+            })
+          },
         },
       ],
     }))
