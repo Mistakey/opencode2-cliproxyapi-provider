@@ -165,15 +165,18 @@ stored "paused" would silently block the next session. It is scoped to one
 location, and the gate is registered for this provider only, so another
 location or another provider is unaffected.
 
-Unload has its own rule. The host replaces a plugin generation on a live
-`location.reload()`: it emits `location.shutdown` to the old generation, but it
-does not call the cleanup returned by `setup` and does not settle an in-flight
-hook itself. A pending pause wait would therefore be orphaned. The plugin ends
-its held waits and stops its event subscription on `location.shutdown` instead,
-so a reload while a request is paused **releases** that request — it is sent and
-the session finishes, rather than being cancelled or left waiting — and the
-replaced generation stops receiving events. A reload therefore starts running,
-like a restart.
+Unload has its own rule. A live `location.reload()` replaces the plugin
+generation, and the host emits `location.shutdown` to the old generation. The
+host does call the cleanup returned by `setup` — but only while no
+`model.request` hook invocation is still pending. A held pause wait is exactly
+such a pending hook: the host's scope close then waits on that fiber and the
+cleanup never runs, so the wait would be orphaned and the replaced generation's
+event subscription would keep receiving events. The plugin therefore ends its
+held waits and stops its event subscription on `location.shutdown` instead of
+relying on the cleanup. A reload while a request is paused **releases** that
+request — it is sent and the session finishes, rather than being cancelled or
+left waiting — and the reloaded location starts running, like a restart. The
+returned cleanup stays as the fallback for the case where the host does call it.
 
 `/cpa-stats` shows the breakdown and the footer shows the last turn. The same
 data is available over RPC (`stats`, `sessions`).
