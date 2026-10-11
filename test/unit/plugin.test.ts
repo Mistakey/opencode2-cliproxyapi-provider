@@ -122,6 +122,11 @@ describe("plugin setup", () => {
     expect(logs).not.toContain("sk-fake")
     expect(JSON.stringify(host.providers)).not.toContain(API_KEY)
     expect(JSON.stringify(host.providers)).not.toContain("apiKey")
+    // The persisted directory cache carries a fingerprint, never the key.
+    const stored = JSON.stringify([...host.storage.values()])
+    expect(stored).not.toContain(API_KEY)
+    expect(stored).not.toContain("sk-fake")
+    expect(stored).toContain("modelsURL")
   })
 
   test("refuses an unsupported host version and a missing interface", async () => {

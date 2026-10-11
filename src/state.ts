@@ -87,6 +87,14 @@ export type ConnectionSnapshot = {
   readonly verifyMessage?: string
   /** Model count from the last successful directory read; `undefined` when never verified. */
   readonly catalogModels?: number
+  /** When the directory was last read successfully. */
+  readonly catalogFetchedAt?: number
+  /** Models retained from an earlier directory read but missing now. */
+  readonly catalogStaleModels?: number
+  /** Ids of the retained models, capped for snapshot size. */
+  readonly catalogStaleIds?: readonly string[]
+  /** Models currently come from a matching persisted cache, not a live read. */
+  readonly catalogFromCache?: boolean
   /** Increments on every connection-changing attempt. */
   readonly generation: number
   readonly updatedAt: number

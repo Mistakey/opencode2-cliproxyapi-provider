@@ -82,6 +82,50 @@ describe("parseCatalogPayload", () => {
     expect(() => parseCatalogPayload(null)).toThrow(CatalogError)
     expect(() => parseCatalogPayload({ error: "boom" })).toThrow(CatalogError)
   })
+
+  test("prefers the real slug over the id alias", () => {
+    const entries = parseCatalogPayload({ models: [{ slug: "real-id", id: "alias-id", name: "Alias" }] })
+    expect(entries).toEqual([{ id: "real-id", name: "Alias", hidden: false }])
+  })
+
+  test("ignores malformed fields instead of inventing values", () => {
+    const entries = parseCatalogPayload({
+      models: [
+        {
+          slug: "odd",
+          display_name: 42,
+          context_window: "large",
+          max_output_tokens: -5,
+          input_modalities: "image",
+          supported_reasoning_levels: "high",
+        },
+        { slug: 7, id: "kept" },
+        { slug: "nan", context_window: Number.NaN, max_tokens: Number.POSITIVE_INFINITY },
+      ],
+    })
+    expect(entries).toEqual([
+      { id: "odd", hidden: false },
+      { id: "kept", hidden: false },
+      { id: "nan", hidden: false },
+    ])
+  })
+
+  test("does not infer support from a model name and keeps the directory's own limit", () => {
+    // A vision-looking name without the directory field stays text-only, and a
+    // small declared context window is not replaced by any external guess.
+    const model = toModelInfo(providerID, {
+      id: "gpt-4-vision-preview",
+      name: "GPT-4 Vision",
+      contextWindow: 32_000,
+    })
+    expect(model.capabilities.input).toEqual(["text"])
+    expect(model.limit).toEqual({ context: 32_000, output: DEFAULT_MAX_OUTPUT_TOKENS })
+  })
+
+  test("keeps the directory's own limit", () => {
+    const model = toModelInfo(providerID, { id: "known-name", contextWindow: 32_000 })
+    expect(model.limit.context).toBe(32_000)
+  })
 })
 
 describe("toModelInfo", () => {

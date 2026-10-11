@@ -9,13 +9,21 @@
 
 import type { ConnectionSnapshot, VerifyKind } from "./state"
 
+/** Event payload the server pushes; `data` carries the event's own fields. */
+export interface RpcEvent {
+  readonly location?: { directory?: string } | undefined
+  readonly data?: unknown
+}
+
 /** The subset of the CPA RPC client this view uses. */
 export interface ConnectionRpc {
   readonly status: (input?: unknown) => Promise<unknown>
   readonly verify: (input: { address: string; key?: string }) => Promise<unknown>
   readonly connect: (input: { address: string; key: string }) => Promise<unknown>
+  readonly refresh: (input?: unknown) => Promise<unknown>
   readonly events: {
-    readonly on: (name: "changed", handler: (event: { location?: { directory?: string } | undefined }) => void) => () => void
+    on(name: "changed", handler: (event: RpcEvent) => void): () => void
+    on(name: "stale", handler: (event: RpcEvent) => void): () => void
   }
 }
 
@@ -47,6 +55,14 @@ export function parseReport(value: unknown): ConnectionReport | undefined {
   return value as unknown as ConnectionReport
 }
 
+/** Model id carried by a `stale` event, when it is shaped as expected. */
+export function parseStaleModelID(event: RpcEvent): string | undefined {
+  const data = event.data
+  if (!isRecord(data)) return undefined
+  const modelID = data.modelID
+  return typeof modelID === "string" && modelID ? modelID : undefined
+}
+
 /** Events arrive from every location; only this location's state is rendered. */
 export function matchesLocation(
   event: { location?: { directory?: string } | undefined } | undefined,
@@ -56,14 +72,28 @@ export function matchesLocation(
   return event?.location?.directory === directory
 }
 
+function formatTime(value: number | undefined): string {
+  if (value === undefined || !Number.isFinite(value)) return "(never)"
+  return new Date(value).toISOString()
+}
+
 /** Short footer text; "saved" and "verified" are deliberately different states. */
 export function describeConnection(snapshot: ConnectionSnapshot | undefined, connected: boolean): string {
   if (!connected) return "CPA offline"
   if (!snapshot) return "CPA not configured"
-  if (snapshot.verified === "ok") {
-    return snapshot.catalogModels === 0 ? "CPA empty" : `CPA ${snapshot.catalogModels ?? "?"} models`
+  const models = snapshot.catalogModels
+  if (snapshot.verified === "failed") {
+    // A failed refresh keeps the last good models; show both facts.
+    if (models !== undefined && models > 0) return `CPA ${models} models · ${snapshot.verifyKind ?? "error"}`
+    return `CPA ${snapshot.verifyKind ?? "failed"}`
   }
-  if (snapshot.verified === "failed") return `CPA ${snapshot.verifyKind ?? "failed"}`
+  if (snapshot.verified === "ok") {
+    if (models === 0) return "CPA empty"
+    const stale = snapshot.catalogStaleModels ?? 0
+    const staleText = stale > 0 ? ` · ${stale} stale` : ""
+    const cachedText = snapshot.catalogFromCache ? " (cached)" : ""
+    return `CPA ${models ?? "?"} models${staleText}${cachedText}`
+  }
   return snapshot.keySaved ? "CPA saved" : "CPA not configured"
 }
 
@@ -81,6 +111,8 @@ export function describeDetail(
     `saved: ${snapshot.keySaved ? "yes" : "no"}`,
     `verified: ${snapshot.verified === "failed" && snapshot.verifyKind ? `failed (${snapshot.verifyKind})` : snapshot.verified}`,
     `models: ${snapshot.catalogModels ?? "(unknown)"}`,
+    `last refresh: ${formatTime(snapshot.catalogFetchedAt)}${snapshot.catalogFromCache ? " (from cache)" : ""}`,
+    `stale: ${snapshot.catalogStaleModels ?? 0}${snapshot.catalogStaleIds?.length ? ` (${snapshot.catalogStaleIds.join(", ")})` : ""}`,
     `generation: ${snapshot.generation}`,
   ]
   if (snapshot.verifyMessage) lines.push(`detail: ${snapshot.verifyMessage}`)
@@ -93,6 +125,8 @@ export interface ConnectionView {
   lastError(): string | undefined
   /** Re-read the authoritative snapshot. Safe to call after a reconnect. */
   refresh(): Promise<void>
+  /** Ask the server to read the directory again, bypassing the cache. */
+  refreshCatalog(): Promise<ConnectionReport>
   /** Subscribe to server pushes; returns the unsubscribe function. */
   subscribe(): () => void
   verify(address: string, key?: string): Promise<ConnectionReport>
@@ -103,6 +137,8 @@ export function createConnectionView(input: {
   rpc: ConnectionRpc
   directory?: string
   onUpdate?: () => void
+  /** Called when a request selects a model the server still serves from cache. */
+  onStale?: (modelID: string) => void
 }): ConnectionView {
   let snapshot: ConnectionSnapshot | undefined
   let connected = false
@@ -140,11 +176,22 @@ export function createConnectionView(input: {
     connected: () => connected,
     lastError: () => lastError,
     refresh,
-    subscribe: () =>
-      input.rpc.events.on("changed", (event) => {
+    refreshCatalog: async () => applyReport(parseReport(await input.rpc.refresh({}))),
+    subscribe: () => {
+      const stopChanged = input.rpc.events.on("changed", (event) => {
         if (!matchesLocation(event, input.directory)) return
         void refresh()
-      }),
+      })
+      const stopStale = input.rpc.events.on("stale", (event) => {
+        if (!matchesLocation(event, input.directory)) return
+        const modelID = parseStaleModelID(event)
+        if (modelID) input.onStale?.(modelID)
+      })
+      return () => {
+        stopChanged()
+        stopStale()
+      }
+    },
     verify: async (address, key) => {
       const report = parseReport(await input.rpc.verify(key === undefined ? { address } : { address, key }))
       return applyReport(report)

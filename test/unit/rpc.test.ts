@@ -18,6 +18,10 @@ interface Snapshot {
   verifyKind?: string
   verifyMessage?: string
   catalogModels?: number
+  catalogFetchedAt?: number
+  catalogStaleModels?: number
+  catalogStaleIds?: string[]
+  catalogFromCache?: boolean
   generation: number
   updatedAt: number
 }
@@ -34,6 +38,7 @@ type Handlers = {
   status: (input: unknown) => Promise<Snapshot>
   verify: (input: unknown) => Promise<Result>
   connect: (input: unknown) => Promise<Result>
+  refresh: (input: unknown) => Promise<Result>
 }
 
 let host: FakeHost | undefined
@@ -49,7 +54,8 @@ afterEach(async () => {
 const setup = async (ctx: unknown) => plugin.setup(ctx as Parameters<typeof plugin.setup>[0])
 
 function handlersOf(target: FakeHost): Handlers {
-  const registration = target.rpcRegistrations[0]
+  // A second setup (a simulated restart) registers again; use the newest one.
+  const registration = target.rpcRegistrations.at(-1)
   if (!registration) throw new Error("the plugin registered no RPC")
   return registration.handlers as Handlers
 }
@@ -250,5 +256,157 @@ describe("CPA connection RPC", () => {
     expect(status.location).toBe("/work/two")
     expect(host.connectCalls[0]?.integrationID).toBe("acme-cpa")
     expect((host.providers[0] as { info: { integrationID: string } }).info.integrationID).toBe("acme-cpa")
+  })
+})
+
+describe("CPA catalog refresh, cache and stale RPC", () => {
+  test("manual refresh re-reads the directory and reports the new model count", async () => {
+    let reply: { status?: number; body?: unknown } = { status: 200, body: { models: [{ slug: "a" }] } }
+    mock = await startMockCpa({ directory: () => reply })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+
+    const before = await handlers.status!({})
+    expect(before.catalogModels).toBe(1)
+    expect(before.catalogFromCache).toBe(false)
+    expect(before.catalogFetchedAt).toBeGreaterThan(0)
+
+    reply = { status: 200, body: { models: [{ slug: "a" }, { slug: "b" }] } }
+    const refreshed = await handlers.refresh!({})
+    expect(refreshed).toMatchObject({ ok: true, kind: "ok", models: 2 })
+    const status = await handlers.status!({})
+    expect(status.catalogModels).toBe(2)
+    expect(status.catalogStaleModels).toBe(0)
+    expect(status.verified).toBe("ok")
+    expect(status.catalogFetchedAt).toBeGreaterThanOrEqual(before.catalogFetchedAt!)
+    expect((host.providers[0] as { models: { id: string }[] }).models.map((m) => m.id)).toEqual(["a", "b"])
+  })
+
+  test("a failed refresh keeps the last directory and reports the failure", async () => {
+    let reply: { status?: number; body?: unknown } = { status: 200, body: { models: [{ slug: "kept" }] } }
+    mock = await startMockCpa({ directory: () => reply })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+    const before = await handlers.status!({})
+
+    reply = { status: 503, body: { error: "upstream down" } }
+    const failed = await handlers.refresh!({})
+    expect(failed).toMatchObject({ ok: false, kind: "unreachable" })
+
+    const after = await handlers.status!({})
+    expect(after.catalogModels).toBe(1)
+    expect(after.catalogFetchedAt).toBe(before.catalogFetchedAt)
+    expect(after.verified).toBe("failed")
+    expect(after.verifyKind).toBe("unreachable")
+    expect((host.providers[0] as { models: { id: string }[] }).models.map((m) => m.id)).toEqual(["kept"])
+  })
+
+  test("an empty directory is a success that stales the previous models", async () => {
+    let reply: { status?: number; body?: unknown } = { status: 200, body: { models: [{ slug: "kept" }] } }
+    mock = await startMockCpa({ directory: () => reply })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+
+    reply = { status: 200, body: { models: [] } }
+    const emptied = await handlers.refresh!({})
+    expect(emptied).toMatchObject({ ok: true, kind: "empty" })
+
+    const status = await handlers.status!({})
+    expect(status.verified).toBe("ok")
+    expect(status.catalogModels).toBe(1)
+    expect(status.catalogStaleModels).toBe(1)
+    expect(status.catalogStaleIds).toEqual(["kept"])
+    // A retained model stays registered and selectable; the warning is separate.
+    const model = (host.providers[0] as { models: { id: string; status: string; enabled: boolean }[] }).models[0]
+    expect(model?.status).toBe("active")
+    expect(model?.enabled).toBe(true)
+  })
+
+  test("a restart serves a matching cache immediately and refreshes in the background", async () => {
+    let reply: { status?: number; body?: unknown } | (() => Promise<{ status?: number; body?: unknown }>) = {
+      status: 200,
+      body: { models: [{ slug: "cached-a" }, { slug: "cached-b" }] },
+    }
+    mock = await startMockCpa({ directory: () => (typeof reply === "function" ? reply() : reply) })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+    expect((await handlersOf(host).status!({})).catalogModels).toBe(2)
+
+    // The second setup stands for a restart: the directory now fails, but the
+    // matching cache must still register its models before the refresh lands.
+    reply = () => new Promise((resolve) => setTimeout(() => resolve({ status: 503, body: { error: "down" } }), 300))
+    await setup(host.ctx)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+
+    const immediate = await handlers.status!({})
+    expect(immediate.catalogModels).toBe(2)
+    expect(immediate.catalogFromCache).toBe(true)
+    expect((host.providers[0] as { models: { id: string }[] }).models.map((m) => m.id)).toEqual([
+      "cached-a",
+      "cached-b",
+    ])
+
+    await sleep(500)
+    const settled = await handlers.status!({})
+    // The failed refresh kept the cached models, so they are still cache-served.
+    expect(settled.catalogModels).toBe(2)
+    expect(settled.catalogFromCache).toBe(true)
+    expect(settled.verified).toBe("failed")
+  })
+
+  test("does not serve one credential's cached directory to another", async () => {
+    let reply: { status?: number; body?: unknown } = { status: 200, body: { models: [{ slug: "alpha-only" }] } }
+    mock = await startMockCpa({ directory: () => reply })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+
+    reply = { status: 200, body: { models: [{ slug: "beta-only" }] } }
+    const switched = await handlers.connect!({ address: mock.url, key: "sk-fake-beta-key" })
+    expect(switched.ok).toBe(true)
+    expect((host.providers[0] as { models: { id: string }[] }).models.map((m) => m.id)).toEqual(["beta-only"])
+
+    // Each credential has its own record, and no record holds key material.
+    const stored = JSON.stringify([...host.storage.values()])
+    expect(stored).not.toContain(API_KEY)
+    expect(stored).not.toContain("sk-fake-beta-key")
+    expect(host.storage.size).toBe(2)
+  })
+
+  test("warns once when a request selects a model retained as stale", async () => {
+    let reply: { status?: number; body?: unknown } = {
+      status: 200,
+      body: { models: [{ slug: "kept" }, { slug: "gone" }] },
+    }
+    mock = await startMockCpa({ directory: () => reply })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+
+    reply = { status: 200, body: { models: [{ slug: "kept" }] } }
+    await handlers.refresh!({})
+    expect((await handlers.status!({})).catalogStaleModels).toBe(1)
+
+    const hook = host.sessionHooks.find((entry) => entry.name === "model.request")
+    expect(hook).toBeDefined()
+    const before = host.rpcEvents.length
+
+    hook!.handler({ model: { id: "gone", providerID: "cliproxyapi" } })
+    expect(host.rpcEvents.at(-1)).toMatchObject({ name: "stale", data: { modelID: "gone" } })
+
+    // The same stale selection is only announced once, and fresh models never are.
+    hook!.handler({ model: { id: "gone", providerID: "cliproxyapi" } })
+    hook!.handler({ model: { id: "kept", providerID: "cliproxyapi" } })
+    expect(host.rpcEvents.length).toBe(before + 1)
   })
 })

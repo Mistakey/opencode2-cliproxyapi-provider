@@ -13,6 +13,11 @@ export const RPC_ID = "cliproxyapi"
 
 const sourceEnum = { type: "string", enum: ["options", "env", "stored", "default", "wizard"] }
 const verifyKindEnum = { type: "string", enum: ["ok", "empty", "auth", "unreachable", "format", "address"] }
+/** Refresh outcomes extend the verify kinds with "nothing was committed". */
+const resultKindEnum = {
+  type: "string",
+  enum: ["ok", "empty", "auth", "unreachable", "format", "address", "stale", "cancelled"],
+}
 
 /** Mirrors `ConnectionSnapshot`; optional fields are absent until known. */
 export const snapshotSchema = {
@@ -30,6 +35,10 @@ export const snapshotSchema = {
     verifyKind: verifyKindEnum,
     verifyMessage: { type: "string" },
     catalogModels: { type: "integer" },
+    catalogFetchedAt: { type: "number" },
+    catalogStaleModels: { type: "integer" },
+    catalogStaleIds: { type: "array", items: { type: "string" } },
+    catalogFromCache: { type: "boolean" },
     generation: { type: "integer" },
     updatedAt: { type: "number" },
   },
@@ -50,12 +59,19 @@ const resultSchema = {
   type: "object",
   properties: {
     ok: { type: "boolean" },
-    kind: verifyKindEnum,
+    kind: resultKindEnum,
     message: { type: "string" },
     models: { type: "integer" },
     snapshot: snapshotSchema,
   },
   required: ["ok", "kind", "snapshot"],
+  additionalProperties: false,
+} as const
+
+const staleSchema = {
+  type: "object",
+  properties: { modelID: { type: "string" } },
+  required: ["modelID"],
   additionalProperties: false,
 } as const
 
@@ -80,6 +96,11 @@ export const CpaRpc = Rpc.define({
       },
       output: resultSchema,
     },
+    /** Read the active connection's directory again, bypassing the cache. */
+    refresh: {
+      input: { type: "object", additionalProperties: false },
+      output: resultSchema,
+    },
     /** Verify first, then save through OpenCode's native key method and rebind models. */
     connect: {
       input: {
@@ -97,6 +118,8 @@ export const CpaRpc = Rpc.define({
   events: {
     /** Emitted after every committed connection change. */
     changed: { schema: snapshotSchema },
+    /** Emitted once when a request uses a model retained as stale. */
+    stale: { schema: staleSchema },
   },
 })
 

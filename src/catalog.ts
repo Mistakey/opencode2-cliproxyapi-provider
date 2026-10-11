@@ -173,7 +173,15 @@ function resolveLimit(entry: CatalogEntry): Model.Info["limit"] {
   return { context, output: Math.min(requestedOutput, context) }
 }
 
-/** Map one directory entry onto an OpenCode model definition. */
+/**
+ * Map one directory entry onto an OpenCode model definition.
+ *
+ * A model that this connection listed before and that the current directory no
+ * longer reports is still registered and selectable: the plugin cannot know the
+ * upstream is gone for good, and the reference plugin keeps such models in the
+ * list too. The warning that it may no longer be available is delivered
+ * separately (the `stale` RPC event and the TUI status), not by disabling it.
+ */
 export function toModelInfo(providerID: Provider.ID, entry: CatalogEntry): Model.Info {
   const modelID = Model.ID.make(entry.id)
   const defaults = Model.Info.default(providerID, modelID)

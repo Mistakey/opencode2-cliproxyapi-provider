@@ -104,6 +104,16 @@ export default Plugin.define({
       rpc: context.client.rpc(CpaRpc),
       directory,
       onUpdate: () => setRevision((value) => value + 1),
+      // The server keeps a model that disappeared from the directory for a
+      // while; selecting it warns instead of promising the upstream serves it.
+      onStale: (modelID) => {
+        context.ui.toast.show({
+          title: "CLIProxyAPI",
+          message: `Model '${modelID}' is stale — kept from the last directory read and possibly no longer available upstream.`,
+          variant: "warning",
+          duration: 8000,
+        })
+      },
     })
     const status = createMemo(() => {
       revision()
@@ -177,6 +187,25 @@ export default Plugin.define({
             await context.ui.dialog.alert({
               title: "CLIProxyAPI",
               message: describeDetail(view.snapshot(), view.connected(), view.lastError()),
+            })
+          },
+        },
+        {
+          id: "cliproxyapi.refresh",
+          title: "Refresh CLIProxyAPI models",
+          description: "Read the CPA directory again, bypassing the cached model list",
+          group: "CLIProxyAPI",
+          palette: true,
+          slash: { name: "cpa-refresh" },
+          run: async () => {
+            const report = await view.refreshCatalog()
+            context.ui.toast.show({
+              title: "CLIProxyAPI",
+              message: report.ok
+                ? `Refreshed: ${report.models ?? 0} models`
+                : `Refresh failed: ${reportMessage(report)}`,
+              variant: report.ok ? "success" : "error",
+              duration: 8000,
             })
           },
         },

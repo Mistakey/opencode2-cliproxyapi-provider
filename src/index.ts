@@ -5,13 +5,20 @@
  * model registration -> native Responses runtime. Credentials stay in OpenCode's
  * own store; the plugin never keeps a key of its own, never logs one, and
  * exposes the connection through a small RPC so a TUI or another client can
- * read a snapshot, verify a candidate pair and switch connection without
- * talking to CPA itself.
+ * read a snapshot, verify a candidate pair, refresh the directory and switch
+ * connection without talking to CPA itself.
+ *
+ * The directory is cached per connection: a restart that finds a matching cache
+ * registers its models immediately and then refreshes in the background, while a
+ * failed refresh keeps the last good models instead of emptying the provider.
  */
 
-import { Plugin, Provider } from "@opencode/plugin"
+import { Model, Plugin, Provider } from "@opencode/plugin"
 import { DEFAULT_BASE_URL, AddressError, resolveEndpoints } from "./address"
-import { toModelInfos } from "./catalog"
+import { toModelInfo } from "./catalog"
+import { connectionFingerprint, countStale, staleIds, type CatalogRecord } from "./catalog-cache"
+import { CatalogService, type CatalogIdentity } from "./catalog-service"
+import { createStorageCatalogStore, type CatalogStore, type StorageLike } from "./catalog-store"
 import {
   planConnection,
   readCredential,
@@ -30,7 +37,7 @@ type Context = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0]
 /** The registered CPA RPC, narrowed to what this plugin emits. */
 interface CpaRegistration {
   readonly events: {
-    readonly emit: (name: "changed", data: Readonly<Record<string, unknown>>) => Promise<void>
+    readonly emit: (name: "changed" | "stale", data: Readonly<Record<string, unknown>>) => Promise<void>
   }
   readonly dispose: () => Promise<void>
 }
@@ -65,7 +72,7 @@ async function registerIntegration(
   })
 }
 
-/** Bind the directory's models to the connection that produced them. */
+/** Bind a directory's models to the connection that produced them. */
 async function bindProvider(
   ctx: Context,
   input: {
@@ -74,7 +81,7 @@ async function bindProvider(
     integrationID: ExplicitConfig["integrationID"]
     packageID: string
     baseURL: string
-    models: ReturnType<typeof toModelInfos>
+    models: readonly Model.Info[]
     sourceConnection?: Awaited<ReturnType<Context["integration"]["connection"]["active"]>>
   },
 ): Promise<void> {
@@ -92,6 +99,11 @@ async function bindProvider(
       ...(input.sourceConnection ? { sourceConnection: input.sourceConnection } : {}),
     })
   })
+}
+
+/** Map a cached directory onto model definitions. Stale models stay selectable. */
+function catalogModels(providerID: Provider.ID, record: CatalogRecord): Model.Info[] {
+  return record.models.map((state) => toModelInfo(providerID, state.entry))
 }
 
 function readString(input: unknown, key: string): string | undefined {
@@ -146,10 +158,62 @@ async function setupConnection(ctx: Context) {
   })
 
   let registration: CpaRegistration | undefined
+  // Setup commits state without announcing it: the location is still booting,
+  // so there are no subscribers, and awaiting the event bus here would hold up
+  // model registration. Announcements start once setup has finished.
+  let announce = false
   const publish = async (update: ConnectionUpdate, generation: number): Promise<void> => {
     if (!state.commit(generation, update)) return
+    if (!announce) return
     await registration?.events.emit("changed", state.read())
   }
+
+  const store: CatalogStore = createStorageCatalogStore(ctx.storage as unknown as StorageLike)
+
+  // A stale model is warned about once per selection, not on every request.
+  let notifiedStale: string | undefined
+  const service = new CatalogService({
+    store,
+    read: ({ identity, signal }) =>
+      verifyConnection({
+        address: identity.address,
+        apiKey: identity.key,
+        ...(explicit.catalogTimeoutMs !== undefined ? { timeoutMs: explicit.catalogTimeoutMs } : {}),
+        signal,
+      }),
+    ...(explicit.catalogStaleTtlMs !== undefined ? { staleTtlMs: explicit.catalogStaleTtlMs } : {}),
+    onCommit: async ({ generation, record, kind }) => {
+      const models = catalogModels(providerID, record)
+      const connection = await ctx.integration.connection.active(integrationID)
+      await bindProvider(ctx, {
+        providerID,
+        providerName: explicit.providerName,
+        integrationID,
+        packageID: explicit.package,
+        baseURL: record.baseURL,
+        models,
+        ...(connection ? { sourceConnection: connection } : {}),
+      })
+      await publish(
+        {
+          catalogModels: models.length,
+          catalogFetchedAt: record.fetchedAt,
+          catalogStaleModels: countStale(record),
+          catalogStaleIds: staleIds(record),
+          catalogFromCache: false,
+          verified: "ok",
+          verifyKind: kind,
+          verifyMessage: undefined,
+        },
+        generation,
+      )
+      if (notifiedStale !== undefined && !service.isStale(notifiedStale)) notifiedStale = undefined
+    },
+    onFailure: async ({ generation, kind, message }) => {
+      // The directory is kept as it was; only the connection verdict changes.
+      await publish({ verified: "failed", verifyKind: kind, verifyMessage: message }, generation)
+    },
+  })
 
   registration = await ctx.rpc.register(CpaRpc, {
     // Read-only snapshot; a status reader never triggers a CPA request.
@@ -192,6 +256,28 @@ async function setupConnection(ctx: Context) {
       }
     },
 
+    // Re-read the active connection's directory, bypassing the cache. A failed
+    // read leaves the served models untouched.
+    refresh: async () => {
+      if (!service.ready) {
+        return {
+          ok: false,
+          kind: "address",
+          message: "no CPA connection is active; connect this integration first",
+          snapshot: state.read(),
+        }
+      }
+      const outcome = await service.refresh({ generation: state.generation, mode: "manual" })
+      const record = service.current()
+      return {
+        ok: outcome.ok,
+        kind: outcome.kind,
+        ...(outcome.message !== undefined ? { message: outcome.message } : {}),
+        ...(record ? { models: record.models.length } : {}),
+        snapshot: state.read(),
+      }
+    },
+
     // Verify first, then save through the native key method. A stale attempt
     // that lost a race with a newer connection change saves nothing.
     connect: async (input) => {
@@ -205,7 +291,26 @@ async function setupConnection(ctx: Context) {
           snapshot: state.read(),
         }
       }
+      let endpoints
+      try {
+        endpoints = resolveEndpoints(address)
+      } catch (error) {
+        const detail = error instanceof AddressError ? error.message : String(error)
+        return { ok: false, kind: "address", message: detail, snapshot: state.read() }
+      }
+
       const generation = state.begin()
+      const identity: CatalogIdentity = {
+        address,
+        key,
+        baseURL: endpoints.baseURL,
+        modelsURL: endpoints.modelsURL,
+        fingerprint: connectionFingerprint(endpoints.baseURL, key),
+      }
+      // Applied synchronously, so a refresh for the previous connection can no
+      // longer commit even while this one is still being verified.
+      await service.activate(identity, generation)
+
       const outcome = await verifyConnection({
         address,
         apiKey: key,
@@ -229,17 +334,9 @@ async function setupConnection(ctx: Context) {
       }
 
       await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
-      const connection = await ctx.integration.connection.active(integrationID)
-      const endpoints = resolveEndpoints(address)
-      await bindProvider(ctx, {
-        providerID,
-        providerName: explicit.providerName,
-        integrationID,
-        packageID: explicit.package,
-        baseURL: endpoints.baseURL,
-        models: toModelInfos(providerID, outcome.entries),
-        ...(connection ? { sourceConnection: connection } : {}),
-      })
+      // Commits the merged catalog (fresh plus any stale models of this
+      // connection) and rebinds the provider.
+      await service.applyRead({ generation, entries: outcome.entries, kind: outcome.kind })
       await publish(
         connectionUpdate({
           address,
@@ -249,27 +346,38 @@ async function setupConnection(ctx: Context) {
           keySaved: true,
           verified: "ok",
           verifyKind: outcome.kind,
-          catalogModels: outcome.entries.length,
         }),
         generation,
       )
       return {
         ok: true,
         kind: outcome.kind,
-        models: outcome.entries.length,
+        models: service.current()?.models.length ?? outcome.entries.length,
         snapshot: state.read(),
       }
     },
   })
 
+  // Warn once when a request actually selects a model retained as stale, so the
+  // user is not told the upstream is still serving it.
+  const staleHook = await ctx.session.hook(
+    "model.request",
+    (input) => {
+      const modelID = String(input.model.id)
+      if (!service.isStale(modelID) || notifiedStale === modelID) return
+      notifiedStale = modelID
+      void registration?.events.emit("stale", { modelID })
+    },
+    { providerID },
+  )
+
   const cleanup = async () => {
+    service.dispose()
+    await staleHook?.dispose()
     await registration?.dispose()
   }
 
   // Initial connection from explicit configuration or the stored credential.
-  // The state is committed here but not published: the location is still
-  // booting, so there are no subscribers yet, and awaiting the event bus here
-  // would hold up model registration.
   const planned = planConnection({ explicit, active: activeCredential })
   const generation = state.begin()
   if (!planned.ok) {
@@ -314,65 +422,87 @@ async function setupConnection(ctx: Context) {
     return cleanup
   }
 
-  const outcome = await verifyConnection({
+  const identity: CatalogIdentity = {
     address: plan.address,
-    apiKey: plan.key,
-    ...(explicit.catalogTimeoutMs !== undefined ? { timeoutMs: explicit.catalogTimeoutMs } : {}),
-  })
-  if (!state.isCurrent(generation)) {
+    key: plan.key,
+    baseURL: endpoints.baseURL,
+    modelsURL: endpoints.modelsURL,
+    fingerprint: connectionFingerprint(endpoints.baseURL, plan.key),
+  }
+  const cached = await service.activate(identity, generation)
+  if (!state.isCurrent(generation)) return cleanup
+
+  const sourceConnection = plan.store
+    ? ((await ctx.integration.connection.active(integrationID)) ?? activeConnection)
+    : activeConnection
+
+  if (cached) {
+    // Fast start: register the cached directory, then refresh in the background.
+    const models = catalogModels(providerID, cached)
+    await bindProvider(ctx, {
+      providerID,
+      providerName: explicit.providerName,
+      integrationID,
+      packageID: explicit.package,
+      baseURL: cached.baseURL,
+      models,
+      ...(sourceConnection ? { sourceConnection } : {}),
+    })
+    state.commit(generation, {
+      address: plan.address,
+      addressSource: plan.addressSource,
+      keySource: plan.keySource,
+      keyHint: redactKey(plan.key),
+      keySaved: true,
+      verified: "unknown",
+      catalogModels: models.length,
+      catalogFetchedAt: cached.fetchedAt,
+      catalogStaleModels: countStale(cached),
+      catalogStaleIds: staleIds(cached),
+      catalogFromCache: true,
+    })
+    announce = true
+    console.log(
+      `[${PLUGIN_ID}] serving ${models.length} cached models for ${cached.modelsURL} ` +
+        `(connection ${plan.mode}, key ${redactKey(plan.key)}); refreshing in the background`,
+    )
+    void service.refresh({ generation, mode: "background" }).catch((error) => {
+      console.error(`[${PLUGIN_ID}] background refresh failed: ${error instanceof Error ? error.message : String(error)}`)
+    })
     return cleanup
   }
-  if (!outcome.ok) {
+
+  const outcome = await service.refresh({ generation, mode: "initial" })
+  if (!state.isCurrent(generation)) return cleanup
+  if (!outcome.committed) {
+    // The credential is saved even though the directory could not be read; the
+    // snapshot must still say so instead of looking unconfigured.
+    state.commit(generation, {
+      address: plan.address,
+      addressSource: plan.addressSource,
+      keySource: plan.keySource,
+      keyHint: redactKey(plan.key),
+      keySaved: true,
+    })
     const detail = outcome.message ?? outcome.kind
-    state.commit(
-      generation,
-      connectionUpdate({
-        address: plan.address,
-        addressSource: plan.addressSource,
-        keySource: plan.keySource,
-        key: plan.key,
-        keySaved: true,
-        verified: "failed",
-        verifyKind: outcome.kind,
-        verifyMessage: detail,
-      }),
-    )
     console.error(`[${PLUGIN_ID}] connection saved but not verified at ${endpoints.modelsURL} (${detail})`)
     return cleanup
   }
 
-  const models = toModelInfos(providerID, outcome.entries)
-  const sourceConnection = plan.store
-    ? ((await ctx.integration.connection.active(integrationID)) ?? activeConnection)
-    : activeConnection
-  await bindProvider(ctx, {
-    providerID,
-    providerName: explicit.providerName,
-    integrationID,
-    packageID: explicit.package,
-    baseURL: endpoints.baseURL,
-    models,
-    ...(sourceConnection ? { sourceConnection } : {}),
+  const record = service.current()
+  announce = true
+  state.commit(generation, {
+    address: plan.address,
+    addressSource: plan.addressSource,
+    keySource: plan.keySource,
+    keyHint: redactKey(plan.key),
+    keySaved: true,
   })
-  state.commit(
-    generation,
-    connectionUpdate({
-      address: plan.address,
-      addressSource: plan.addressSource,
-      keySource: plan.keySource,
-      key: plan.key,
-      keySaved: true,
-      verified: "ok",
-      verifyKind: outcome.kind,
-      catalogModels: models.length,
-    }),
-  )
-
-  if (models.length === 0) {
+  if (!record || record.models.length === 0) {
     console.warn(`[${PLUGIN_ID}] ${endpoints.modelsURL} returned an empty directory; no models are selectable`)
   }
   console.log(
-    `[${PLUGIN_ID}] registered ${models.length} models from ${endpoints.modelsURL} ` +
+    `[${PLUGIN_ID}] registered ${record?.models.length ?? 0} models from ${endpoints.modelsURL} ` +
       `(connection ${plan.mode}, key ${redactKey(plan.key)}, address from ${plan.addressSource})`,
   )
 

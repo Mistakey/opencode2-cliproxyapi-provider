@@ -20,6 +20,9 @@ export interface FakeHost {
   connectCalls: { integrationID: string; key: string; answer?: Record<string, string> }[]
   rpcRegistrations: { definition: { id: string; methods: Record<string, unknown> }; handlers: Record<string, unknown> }[]
   rpcEvents: { name: string; data: unknown }[]
+  /** Values written through `ctx.storage`, keyed as the plugin keyed them. */
+  storage: Map<string, unknown>
+  sessionHooks: { name: string; options?: unknown; handler: (input: unknown) => unknown }[]
   logs: string[]
   restoreConsole: () => void
 }
@@ -45,6 +48,8 @@ export function createFakeHost(options: {
   const rpcRegistrations: FakeHost["rpcRegistrations"] = []
   const rpcEvents: FakeHost["rpcEvents"] = []
   const logs: string[] = []
+  const storage = new Map<string, unknown>()
+  const sessionHooks: FakeHost["sessionHooks"] = []
 
   let nextCredential = credentials.length + 1
 
@@ -141,6 +146,21 @@ export function createFakeHost(options: {
         return { dispose: async () => undefined }
       },
     },
+    storage: {
+      get: async (key: string) => storage.get(key),
+      set: async (key: string, value: unknown) => {
+        storage.set(key, value)
+      },
+      remove: async (key: string) => {
+        storage.delete(key)
+      },
+    },
+    session: {
+      hook: async (name: string, handler: (input: unknown) => unknown, options?: unknown) => {
+        sessionHooks.push({ name, options, handler })
+        return { dispose: async () => undefined }
+      },
+    },
   }
 
   for (const path of options.omit ?? []) deletePath(ctx, path)
@@ -163,6 +183,8 @@ export function createFakeHost(options: {
     connectCalls,
     rpcRegistrations,
     rpcEvents,
+    storage,
+    sessionHooks,
     logs,
     restoreConsole: () => {
       console.log = originals.log
