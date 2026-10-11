@@ -37,6 +37,8 @@ export interface CatalogEntry {
   /** Declared service tiers; a non-empty list is the Fast capability signal. */
   readonly serviceTiers?: readonly string[]
   readonly hidden?: boolean
+  /** The directory asks for a WebSocket transport for this model. */
+  readonly preferWebsockets?: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -117,6 +119,8 @@ function parseEntry(value: unknown): CatalogEntry | undefined {
     reasoningLevels: normalizeReasoningLevels(value.supported_reasoning_levels),
     serviceTiers: normalizeServiceTiers(value.service_tiers),
     hidden: visibility === "hide",
+    // Only an explicit boolean is a preference; a missing field stays unknown.
+    preferWebsockets: typeof value.prefer_websockets === "boolean" ? value.prefer_websockets : undefined,
   }
 }
 

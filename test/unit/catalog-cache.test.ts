@@ -161,4 +161,29 @@ describe("parseCatalogRecord", () => {
     expect(parseCatalogRecord({ ...record, fetchedAt: Number.NaN })).toBeUndefined()
     expect(parseCatalogRecord("not a record")).toBeUndefined()
   })
+
+  test("keeps the capability metadata a restored model needs: Fast tiers and the WebSocket preference", () => {
+    const record = merge({
+      entries: [
+        entry("capable", { serviceTiers: ["priority"], reasoningLevels: ["high"], preferWebsockets: true }),
+        entry("plain", { preferWebsockets: false }),
+      ],
+      now: 1000,
+    })
+    const restored = parseCatalogRecord(JSON.parse(JSON.stringify(record)))
+    expect(restored?.models[0]?.entry).toEqual({
+      id: "capable",
+      serviceTiers: ["priority"],
+      reasoningLevels: ["high"],
+      preferWebsockets: true,
+    })
+    expect(restored?.models[1]?.entry).toEqual({ id: "plain", preferWebsockets: false })
+
+    // A malformed preference is dropped, never turned into a claim.
+    const malformed = parseCatalogRecord({
+      ...JSON.parse(JSON.stringify(record)),
+      models: [{ entry: { id: "odd", preferWebsockets: "yes" }, lastSeenAt: 1000, stale: false }],
+    })
+    expect(malformed?.models[0]?.entry).toEqual({ id: "odd" })
+  })
 })

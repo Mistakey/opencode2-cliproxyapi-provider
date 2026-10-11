@@ -3,6 +3,7 @@ import plugin from "../../src/index"
 import { resolveEndpoints } from "../../src/address"
 import { catalogStorageKey, connectionFingerprint, mergeCatalog } from "../../src/catalog-cache"
 import { RESPONSES_PACKAGE } from "../../src/connection"
+import { WEBSOCKET_RUNTIME_PACKAGE } from "../../src/transport"
 import { createFakeHost, type FakeHost } from "../support/fake-ctx"
 import { startMockCpa } from "../support/mock-cpa.mjs"
 
@@ -85,7 +86,11 @@ describe("plugin setup", () => {
     expect(provider.info.activation).toBe("enabled")
     expect(provider.info.integrationID).toBe("cliproxyapi")
     expect(provider.info.package).toBe(RESPONSES_PACKAGE)
-    expect(provider.info.settings).toEqual({ baseURL: `${mock.url}/v1` })
+    expect(provider.info.settings).toEqual({
+      baseURL: `${mock.url}/v1`,
+      transport: "http",
+      compaction: { type: "summary" },
+    })
     expect(provider.models.map((model) => model.id)).toEqual(["gpt-5.2-codex", "hidden-model"])
     expect(provider.models.map((model) => model.modelID)).toEqual(["gpt-5.2-codex", "hidden-model"])
     expect(provider.models.map((model) => model.enabled)).toEqual([true, false])
@@ -322,9 +327,16 @@ describe("plugin setup", () => {
     expect(host.logs.join("\n")).toContain("models.dev price estimate unavailable")
   })
 
-  test("a cached directory keeps its variants, Fast parameter and price across a refresh rebind", async () => {
+  test("a cached directory keeps its variants, Fast parameter, price and transport across a refresh rebind", async () => {
     mock = await startMockCpa({
-      models: [{ slug: "capable-model", service_tiers: ["priority"], supported_reasoning_levels: [{ effort: "high" }] }],
+      models: [
+        {
+          slug: "capable-model",
+          service_tiers: ["priority"],
+          supported_reasoning_levels: [{ effort: "high" }],
+          prefer_websockets: true,
+        },
+      ],
     })
     priceMock = await startMockCpa({
       directory: { status: 200, body: { smoke: { models: { "capable-model": { cost: { input: 2, output: 4 } } } } } },
@@ -333,7 +345,14 @@ describe("plugin setup", () => {
     const endpoints = resolveEndpoints(mock.url)
     const fingerprint = connectionFingerprint(endpoints.baseURL, API_KEY)
     const record = mergeCatalog({
-      entries: [{ id: "capable-model", serviceTiers: ["priority"], reasoningLevels: ["high"] }],
+      entries: [
+        {
+          id: "capable-model",
+          serviceTiers: ["priority"],
+          reasoningLevels: ["high"],
+          preferWebsockets: true,
+        },
+      ],
       baseURL: endpoints.baseURL,
       modelsURL: endpoints.modelsURL,
       fingerprint,
@@ -348,35 +367,143 @@ describe("plugin setup", () => {
 
     const bound = () =>
       host!.providers[0] as {
+        info: { package: string; settings: { transport?: string } }
         models: { settings?: Record<string, unknown>; variants: { id: string; settings: unknown }[]; cost: unknown[] }[]
       }
     const assertMapped = () => {
+      // The transport is part of the cached capability metadata, so the restored
+      // provider is the WebSocket one, not the HTTP default.
+      expect(bound().info.package).toBe(WEBSOCKET_RUNTIME_PACKAGE)
+      expect(bound().info.settings.transport).toBe("websocket")
       expect(bound().models[0]?.variants).toEqual([{ id: "high", settings: { reasoningEffort: "high" } }])
       expect(bound().models[0]?.settings).toEqual({ serviceTier: "priority" })
       expect(bound().models[0]?.cost).toEqual([{ input: 2, output: 4, cache: { read: 0, write: 0 } }])
     }
 
     // Fast start from the persisted record: the cached models carry the same
-    // parameters a live read would produce.
+    // parameters and transport a live read would produce.
     assertMapped()
     expect(await status(host)).toMatchObject({
       catalogFromCache: true,
+      transport: "websocket",
+      transportSource: "directory",
       fastEnabled: true,
       fastEffectiveModels: 1,
       costModels: 1,
     })
 
-    // A manual refresh rebinds the provider; Fast and price state must survive it.
+    // A manual refresh rebinds the provider; Fast, price and transport must survive it.
     const handlers = host.rpcRegistrations[0]?.handlers as { refresh: () => Promise<Record<string, unknown>> }
     const refreshed = await handlers.refresh()
     expect(refreshed).toMatchObject({ ok: true })
     assertMapped()
     expect(await status(host)).toMatchObject({
       catalogFromCache: false,
+      transport: "websocket",
       fastEnabled: true,
       fastEffectiveModels: 1,
       costModels: 1,
     })
+  })
+  test("asks for WebSocket only when the directory declares it and the runtime can carry it", async () => {
+    mock = await startMockCpa({ models: [{ slug: "codex", prefer_websockets: true }, { slug: "plain" }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { package: string; settings: unknown } }
+    expect(provider.info.package).toBe(WEBSOCKET_RUNTIME_PACKAGE)
+    expect(provider.info.settings).toEqual({
+      baseURL: `${mock.url}/v1`,
+      transport: "websocket",
+      compaction: { type: "summary" },
+    })
+    expect(host.logs.join("\n")).toContain("transport websocket")
+  })
+
+  test("keeps HTTP when the directory asks for WebSocket but the runtime package cannot carry it", async () => {
+    mock = await startMockCpa({ models: [{ slug: "codex", prefer_websockets: true }] })
+    host = createFakeHost({
+      options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false, websocketPackage: RESPONSES_PACKAGE },
+    })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { package: string; settings: unknown } }
+    expect(provider.info.package).toBe(RESPONSES_PACKAGE)
+    expect(provider.info.settings).toEqual({
+      baseURL: `${mock.url}/v1`,
+      transport: "http",
+      compaction: { type: "summary" },
+    })
+    expect(host.logs.join("\n")).toContain("not a confirmed WebSocket runtime")
+  })
+
+  test("a forced WebSocket keeps the request and diagnoses an HTTP-only package", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({
+      options: {
+        baseURL: mock.url,
+        apiKey: API_KEY,
+        modelsDev: false,
+        transport: "websocket",
+        websocketPackage: RESPONSES_PACKAGE,
+      },
+    })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { transport?: string } } }
+    expect(provider.info.settings.transport).toBe("websocket")
+    expect(host.logs.join("\n")).toContain("has no WebSocket channel")
+  })
+
+  test("refuses an unknown transport value instead of guessing silently", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false, transport: "ws" } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { transport?: string } } }
+    expect(provider.info.settings.transport).toBe("http")
+    expect(host.logs.join("\n")).toContain("transport must be one of")
+  })
+
+  test("native compaction is declared only for the runtime package that exposes it", async () => {
+    mock = await startMockCpa({ models: [{ slug: "codex", prefer_websockets: true }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false, compaction: "native" } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { compaction?: unknown } } }
+    expect(provider.info.settings.compaction).toEqual({ type: "native" })
+  })
+
+  test("a native request against an HTTP-only runtime keeps summary and says why", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false, compaction: "native" } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { compaction?: unknown } } }
+    expect(provider.info.settings.compaction).toEqual({ type: "summary" })
+    expect(host.logs.join("\n")).toContain("exposes no compaction endpoint")
+  })
+
+  test("registers the transport, summary and stale hooks and never an HTTP hook", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const names = host.sessionHooks.map((hook) => hook.name).sort()
+    expect(names).toEqual(["compaction", "experimental.ws.handshake", "experimental.ws.send", "model.request"])
+    expect(names.some((name) => name.startsWith("http."))).toBe(false)
+    expect(
+      host.sessionHooks.every(
+        (hook) => (hook.options as { providerID?: string } | undefined)?.providerID === "cliproxyapi",
+      ),
+    ).toBe(true)
   })
 })
 

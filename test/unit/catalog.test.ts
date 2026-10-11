@@ -106,7 +106,6 @@ describe("parseCatalogPayload", () => {
     expect(() => parseCatalogPayload(null)).toThrow(CatalogError)
     expect(() => parseCatalogPayload({ error: "boom" })).toThrow(CatalogError)
   })
-
   test("prefers the real slug over the id alias", () => {
     const entries = parseCatalogPayload({ models: [{ slug: "real-id", id: "alias-id", name: "Alias" }] })
     expect(entries).toEqual([{ id: "real-id", name: "Alias", hidden: false }])
@@ -149,6 +148,18 @@ describe("parseCatalogPayload", () => {
   test("keeps the directory's own limit", () => {
     const model = toModelInfo(providerID, { id: "known-name", contextWindow: 32_000 })
     expect(model.limit.context).toBe(32_000)
+  })
+
+  test("reads the WebSocket preference only when the directory declares a boolean", () => {
+    const entries = parseCatalogPayload({
+      models: [
+        { slug: "codex", prefer_websockets: true },
+        { slug: "plain", prefer_websockets: false },
+        { slug: "unknown" },
+        { slug: "textual", prefer_websockets: "true" },
+      ],
+    })
+    expect(entries.map((entry) => entry.preferWebsockets)).toEqual([true, false, undefined, undefined])
   })
 })
 

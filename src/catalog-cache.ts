@@ -137,6 +137,9 @@ function parseEntry(value: unknown): CatalogEntry | undefined {
   if (Array.isArray(value.serviceTiers) && value.serviceTiers.every((item) => typeof item === "string")) {
     entry.serviceTiers = value.serviceTiers
   }
+  // The WebSocket preference is capability metadata as well: a model restored
+  // from the cache must select the same transport a fresh read would have.
+  if (typeof value.preferWebsockets === "boolean") entry.preferWebsockets = value.preferWebsockets
   if (typeof value.hidden === "boolean") entry.hidden = value.hidden
   return entry as unknown as CatalogEntry
 }

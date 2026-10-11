@@ -37,8 +37,10 @@ import { matchModelCost, toModelCost, type ModelsDevCatalog } from "./cost"
 import { fastStorageKey, readFastPreference, writeFastPreference } from "./fast"
 import { PLUGIN_ID, describeIssues, inspectHost } from "./host"
 import { DEFAULT_MODELS_DEV_URL, fetchModelsDevCatalog } from "./models-dev"
+import { ContinuationReset, SOCKET_HEADER } from "./continuation"
 import { CpaRpc } from "./rpc"
 import { ConnectionState, connectionUpdate, verifyConnection, type ConnectionUpdate } from "./state"
+import { directoryPrefersWebSocket, planCompaction, planTransport, type CompactionPolicy, type TransportPolicy } from "./transport"
 
 /** The host context this plugin registers against. */
 type Context = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0]
@@ -92,6 +94,8 @@ async function bindProvider(
     providerName: string
     integrationID: ExplicitConfig["integrationID"]
     packageID: string
+    transport: TransportPolicy["transport"]
+    compaction: CompactionPolicy["type"]
     baseURL: string
     models: readonly Model.Info[]
     sourceConnection?: ActiveConnection
@@ -105,7 +109,9 @@ async function bindProvider(
         activation: "enabled",
         integrationID: input.integrationID,
         package: input.packageID,
-        settings: { baseURL: input.baseURL },
+        // The transport is an explicit provider setting: the host falls back to
+        // HTTP/SSE with a warning when the chosen package has no WS channel.
+        settings: { baseURL: input.baseURL, transport: input.transport, compaction: { type: input.compaction } },
       },
       models: input.models,
       ...(input.sourceConnection ? { sourceConnection: input.sourceConnection } : {}),
@@ -171,7 +177,55 @@ async function setupConnection(ctx: Context) {
   const integrationID = explicit.integrationID
   const location = String(ctx.location?.directory ?? "")
 
+  /** One transport decision per directory read; the host selects transport per provider. */
+  const policyFor = (entries: readonly CatalogEntry[]): TransportPolicy =>
+    planTransport({
+      preference: explicit.transport,
+      directoryPrefersWebSocket: directoryPrefersWebSocket(entries),
+      httpPackage: explicit.package,
+      websocketPackage: explicit.websocketPackage,
+      ...(explicit.transportInvalid !== undefined ? { invalidPreference: explicit.transportInvalid } : {}),
+    })
+
+  /** Native compaction is only declared when the chosen runtime package exposes it. */
+  const compactionFor = (policy: TransportPolicy): CompactionPolicy =>
+    planCompaction({
+      preference: explicit.compaction,
+      package: policy.package,
+      ...(explicit.compactionInvalid !== undefined ? { invalidPreference: explicit.compactionInvalid } : {}),
+    })
+
   await registerIntegration(ctx, explicit, integrationID)
+
+  // A summary must drop CPA's server-side continuation state. The handshake
+  // hook is the public way to make the host open a fresh socket for the next
+  // turn; it is registered for every transport and only fires for WebSocket
+  // requests, so an HTTP connection is untouched.
+  const continuation = new ContinuationReset()
+  const compactionHook = await ctx.session.hook(
+    "compaction",
+    (input) => {
+      continuation.markCompacted(input.sessionID)
+    },
+    { providerID: String(providerID) },
+  )
+  const handshakeHook = await ctx.session.hook(
+    "experimental.ws.handshake",
+    (input) => {
+      input.headers = { ...input.headers, [SOCKET_HEADER]: continuation.socketGeneration(input.sessionID) }
+    },
+    { providerID: String(providerID) },
+  )
+  // Native compaction keeps the socket: the checkpoint request itself is a frame
+  // on it, so the pre-compaction state has to be dropped on the frame *after*
+  // that request. The trigger marker is the host's own request control.
+  const sendHook = await ctx.session.hook(
+    "experimental.ws.send",
+    (input) => {
+      if (input.frame.includes("compaction_trigger")) continuation.markCompacted(input.sessionID)
+    },
+    { providerID: String(providerID) },
+  )
 
   const activeConnection = await ctx.integration.connection.active(integrationID)
   const activeCredential = activeConnection
@@ -251,16 +305,24 @@ async function setupConnection(ctx: Context) {
     ...(explicit.catalogStaleTtlMs !== undefined ? { staleTtlMs: explicit.catalogStaleTtlMs } : {}),
     onCommit: async ({ generation, record, kind }) => {
       const models = await modelsForRecord(record)
+      // The transport is a property of the directory this record came from, so a
+      // cached record restores the same decision a fresh read would have made.
+      const policy = policyFor(record.models.map((state) => state.entry))
+      const compaction = compactionFor(policy)
       const connection = await ctx.integration.connection.active(integrationID)
       await bindProvider(ctx, {
         providerID,
         providerName: explicit.providerName,
         integrationID,
-        packageID: explicit.package,
+        packageID: policy.package,
+        transport: policy.transport,
+        compaction: compaction.type,
         baseURL: record.baseURL,
         models,
         ...(connection ? { sourceConnection: connection } : {}),
       })
+      if (policy.note) console.warn(`[${PLUGIN_ID}] transport: ${policy.note}`)
+      if (compaction.note) console.warn(`[${PLUGIN_ID}] compaction: ${compaction.note}`)
       await publish(
         {
           catalogModels: models.length,
@@ -271,6 +333,12 @@ async function setupConnection(ctx: Context) {
           verified: "ok",
           verifyKind: kind,
           verifyMessage: undefined,
+          transport: policy.transport,
+          transportSource: policy.source,
+          directoryPrefersWebSocket: policy.directoryPrefersWebSocket,
+          transportNote: policy.note,
+          compaction: compaction.type,
+          compactionNote: compaction.note,
           ...recordStats(record, models),
         },
         generation,
@@ -403,7 +471,7 @@ async function setupConnection(ctx: Context) {
 
       await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
       // Commits the merged catalog (fresh plus any stale models of this
-      // connection) and rebinds the provider.
+      // connection) and rebinds the provider, including its transport.
       await service.applyRead({ generation, entries: outcome.entries, kind: outcome.kind })
       await publish(
         connectionUpdate({
@@ -465,6 +533,9 @@ async function setupConnection(ctx: Context) {
     service.dispose()
     await staleHook?.dispose()
     await registration?.dispose()
+    await compactionHook.dispose()
+    await handshakeHook.dispose()
+    await sendHook.dispose()
   }
 
   // Initial connection from explicit configuration or the stored credential.
@@ -529,11 +600,17 @@ async function setupConnection(ctx: Context) {
   if (cached) {
     // Fast start: register the cached directory, then refresh in the background.
     const models = await modelsForRecord(cached)
+    // The cached directory carries the transport metadata too, so a restored
+    // model selects the same transport it would after a fresh read.
+    const policy = policyFor(cached.models.map((state) => state.entry))
+    const compaction = compactionFor(policy)
     await bindProvider(ctx, {
       providerID,
       providerName: explicit.providerName,
       integrationID,
-      packageID: explicit.package,
+      packageID: policy.package,
+      transport: policy.transport,
+      compaction: compaction.type,
       baseURL: cached.baseURL,
       models,
       ...(sourceConnection ? { sourceConnection } : {}),
@@ -550,12 +627,21 @@ async function setupConnection(ctx: Context) {
       catalogStaleModels: countStale(cached),
       catalogStaleIds: staleIds(cached),
       catalogFromCache: true,
+      transport: policy.transport,
+      transportSource: policy.source,
+      directoryPrefersWebSocket: policy.directoryPrefersWebSocket,
+      transportNote: policy.note,
+      compaction: compaction.type,
+      compactionNote: compaction.note,
       ...recordStats(cached, models),
     })
     announce = true
+    if (policy.note) console.warn(`[${PLUGIN_ID}] transport: ${policy.note}`)
+    if (compaction.note) console.warn(`[${PLUGIN_ID}] compaction: ${compaction.note}`)
     console.log(
       `[${PLUGIN_ID}] serving ${models.length} cached models for ${cached.modelsURL} ` +
-        `(connection ${plan.mode}, key ${redactKey(plan.key)}, fast ${fastEnabled ? "on" : "off"}, ` +
+        `(connection ${plan.mode}, key ${redactKey(plan.key)}, transport ${policy.transport}, ` +
+        `fast ${fastEnabled ? "on" : "off"}, ` +
         `prices ${state.read().costModels ?? 0}); refreshing in the background`,
     )
     void service.refresh({ generation, mode: "background" }).catch((error) => {
@@ -577,6 +663,24 @@ async function setupConnection(ctx: Context) {
       keySaved: true,
     })
     const detail = outcome.message ?? outcome.kind
+    // A failed read still reports the transport of whatever directory is being
+    // served, so a cached connection keeps its decision visible. The failure
+    // verdict itself was already published by the service's failure callback.
+    const failedPolicy = policyFor(service.current()?.models.map((entry) => entry.entry) ?? [])
+    const failedCompaction = compactionFor(failedPolicy)
+    state.commit(generation, {
+      address: plan.address,
+      addressSource: plan.addressSource,
+      keySource: plan.keySource,
+      keyHint: redactKey(plan.key),
+      keySaved: true,
+      transport: failedPolicy.transport,
+      transportSource: failedPolicy.source,
+      directoryPrefersWebSocket: failedPolicy.directoryPrefersWebSocket,
+      transportNote: failedPolicy.note,
+      compaction: failedCompaction.type,
+      compactionNote: failedCompaction.note,
+    })
     console.error(`[${PLUGIN_ID}] connection saved but not verified at ${endpoints.modelsURL} (${detail})`)
     return cleanup
   }
@@ -596,6 +700,7 @@ async function setupConnection(ctx: Context) {
   console.log(
     `[${PLUGIN_ID}] registered ${record?.models.length ?? 0} models from ${endpoints.modelsURL} ` +
       `(connection ${plan.mode}, key ${redactKey(plan.key)}, address from ${plan.addressSource}, ` +
+      `transport ${state.read().transport ?? "http"}, ` +
       `fast ${fastEnabled ? "on" : "off"}, prices ${state.read().costModels ?? 0})`,
   )
 

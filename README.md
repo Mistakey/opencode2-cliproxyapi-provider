@@ -4,8 +4,9 @@ OpenCode v2 provider plugin for [CLIProxyAPI](https://github.com/router-for-me/C
 
 It connects OpenCode to a CPA deployment: the plugin reads CPA's enhanced model
 directory, registers the models it reports, and lets OpenCode's **native
-Responses runtime** talk to CPA over HTTP/SSE. It is not a port of the official
-Pi plugin and does not re-implement serialization, streaming or compaction.
+Responses runtime** talk to CPA over HTTP/SSE or WebSocket. It is not a port of
+the official Pi plugin and does not re-implement serialization, streaming or
+compaction.
 
 ## Status of this slice
 
@@ -43,10 +44,19 @@ Delivered here:
 - standard, Fast and context-tiered **price estimates** matched from the public
   models.dev catalog, with the reference alias table and no invented multiplier
 - credential handling through OpenCode's native key method and credential store
+- transport selection driven by the directory's `prefer_websockets` flag, with a
+  forced HTTP/WebSocket option and a clear diagnostic when the chosen runtime
+  package cannot carry the requested transport
+- a WebSocket continuation reset after a summary, so the compacted transcript is
+  not appended to CPA's pre-summary server state
+- an opt-in native (provider-side) compaction request, verified against a mock
+  CPA that serves the Responses checkpoint contract
+- the WebSocket failure matrix, checked against the real host: socket reuse,
+  incremental continuation, invalid `previous_response_id` retry, refused
+  upgrades, parallel sessions, credential rotation and socket release on unload
 - project scaffolding, tests, isolated host scripts and this document
 
-Not part of this slice (later tasks): pause and stats, WebSocket transport and
-its failure matrix, native (provider-side) compaction, real CPA validation.
+Not part of this slice (later tasks): pause and stats, real CPA validation.
 
 ## Requirements
 
@@ -54,7 +64,7 @@ its failure matrix, native (provider-side) compaction, real CPA validation.
 | --- | --- |
 | OpenCode | `>= 2.0.26 < 3` (verified against `2.0.26`) |
 | CPA | serves `/v1/models?client_version=…` and `/v1/responses` |
-| Runtime package | `@opencode/ai/providers/openai-compatible/responses` |
+| Runtime package | `@opencode/ai/providers/openai-compatible/responses` (HTTP) and `@opencode/ai/providers/openai/responses` (WebSocket) |
 
 Older or newer-major hosts are refused at load time with a clear message, as are
 hosts that do not expose the plugin interfaces this package registers against.
@@ -108,9 +118,10 @@ own snapshot and RPC registration, and a change in one location does not
 touch another.
 
 Other options: `providerID` (default `cliproxyapi`), `providerName`,
-`integrationID`, `package` (runtime package override), `catalogTimeoutMs` and
-`catalogStaleTtlMs` (how long a model missing from the directory is retained;
-default seven days, mainly useful for testing).
+`integrationID`, `package` (HTTP runtime package override), `websocketPackage`
+(WebSocket runtime package override), `transport`, `compaction`,
+`catalogTimeoutMs` and `catalogStaleTtlMs` (how long a model missing from the
+directory is retained; default seven days, mainly useful for testing).
 
 The price estimate comes from the public models.dev catalog. It is a supplement,
 not a gate: the lookup runs beside the directory request and a failure only means
@@ -131,6 +142,65 @@ http://127.0.0.1:8317/v1             -> baseURL http://127.0.0.1:8317/v1
 
 The directory is read from `<baseURL>/models?client_version=<this plugin>`, and
 the Responses runtime appends `/responses` to `baseURL`.
+
+## Transport, recovery and compaction
+
+OpenCode selects a transport per provider, so the plugin decides once per
+directory read and reports the decision in the connection snapshot.
+
+| `transport` | Behaviour |
+| --- | --- |
+| `auto` (default) | WebSocket when the directory declares `prefer_websockets` for a visible model **and** the WebSocket runtime package is known to carry a channel; otherwise HTTP/SSE |
+| `http` | Always HTTP/SSE, even when the directory prefers WebSocket |
+| `websocket` | Always ask for WebSocket; the request is kept even when the package cannot carry it, and the snapshot carries the reason |
+
+Two runtime packages are involved because only one of them can carry a socket:
+
+| Transport | Package | Why |
+| --- | --- | --- |
+| HTTP/SSE | `@opencode/ai/providers/openai-compatible/responses` | the compatible Responses route is HTTP-only |
+| WebSocket | `@opencode/ai/providers/openai/responses` | the native OpenAI Responses route has the WebSocket channel and the continuation logic |
+
+That capability split is not assumed: `scripts/host-transport.mjs` loads both
+packages into the real host and records whether a socket is opened. Requesting
+`websocket` against the HTTP-only package keeps the request, falls back to
+HTTP/SSE in the host, and puts the reason in `snapshot.transportNote`. The plugin
+registers no `http.request`/`http.response` hooks, so its own configuration never
+disables the WebSocket path.
+
+### Summary continuation
+
+OpenCode reuses one socket per session and the runtime continues with
+`previous_response_id`. CPA keeps the pre-summary conversation in that
+connection state, so a compacted transcript sent on the same socket would still
+be answered from the old context. The plugin registers the host's `compaction`
+hook and, for native compaction, watches the outbound frame for
+`compaction_trigger`; the next WebSocket handshake then carries a fresh
+`x-oc2cpa-socket` generation, which makes the host reopen the socket and CPA
+treat the compacted transcript as a new conversation. Ordinary turns keep
+reusing their socket.
+
+### Native compaction (opt-in)
+
+`compaction: "native"` declares OpenCode's provider-side compaction instead of
+the default `"summary"`. It is only declared when the selected runtime package
+exposes a compaction endpoint; against the HTTP-only package the plugin keeps
+summary and says why in `snapshot.compactionNote`. The host then asks for a
+compaction checkpoint with a `compaction_trigger` frame and carries the returned
+checkpoint into the next turn, which `scripts/host-transport.mjs` checks. The
+default remains summary.
+
+### Failure behaviour observed on the tested host
+
+| Situation | Behaviour |
+| --- | --- |
+| directory prefers WebSocket | one socket per session, reused across turns; a follow-up turn sends only the delta with `previous_response_id` |
+| invalid `previous_response_id` | the host retries with a full transcript; an output that already reached the client is never re-sent |
+| WebSocket upgrade refused | the host falls back to HTTP/SSE; the run does not fail silently |
+| summary or native checkpoint | the next turn opens a fresh socket, so the old history is not appended to the pre-compaction state |
+| parallel sessions | one socket per session; sockets are not shared |
+| connection switch (rotated key) | the next session's socket uses the new address and key; the replaced connection gets no new socket |
+| service stop (plugin unload) | the sockets are closed |
 
 ## Interactive connect and TUI
 
@@ -179,8 +249,10 @@ from every location and must filter. The snapshot never contains the key, only
 `(redacted, N chars)`; it also reports `catalogModels`, `catalogFetchedAt`,
 `catalogStaleModels`/`catalogStaleIds` and `catalogFromCache`, keeps the Fast
 preference (`fastEnabled`) apart from what is registered right now
-(`fastEffectiveModels`), and reports how many models carry a price estimate
-(`costModels`).
+(`fastEffectiveModels`), reports how many models carry a price estimate
+(`costModels`), and reports the transport decision (`transport`,
+`transportSource`, `directoryPrefersWebSocket`, `transportNote`) and the
+compaction mechanism (`compaction`, `compactionNote`).
 
 ## Model mapping
 
@@ -316,9 +388,23 @@ its result.
 bun run smoke:catalog
 ```
 
-All three talk to loopback mocks only — a mock CPA, plus a models.dev price
+`scripts/host-transport.mjs` covers transport selection and failure recovery
+against a mock CPA that serves both Responses HTTP/SSE and a real Responses
+WebSocket and applies CPA's transcript state machine: `auto` selecting WebSocket
+from the directory preference and reusing one socket, the summary and native
+compaction paths (including the fresh socket after each), a refused upgrade, an
+invalid `previous_response_id`, an HTTP-only package asked for WebSocket,
+parallel sessions, a rotated credential and socket release on unload.
+
+```bash
+bun run smoke:transport
+```
+
+All of them talk to loopback mocks only — a mock CPA, plus a models.dev price
 fixture for the smoke run: no real credential, no real CPA request, no cost.
-`SMOKE_DEBUG=1` also dumps the request sequence of the smoke run.
+`SMOKE_DEBUG=1` also dumps the request sequence of the smoke run, and
+`OC2CPA_ONLY=ws|http|diagnostic|recovery|native|parallel|rotation` runs one
+transport scenario.
 
 ## Development
 
@@ -329,24 +415,35 @@ tests and the host scripts against that `node_modules`.
 npm ci                 # install the locked development dependencies
 bun test               # unit + native-runtime integration tests
 bun test test/unit     # directory parsing, mapping, cache/stale, prices, Fast, connection, state, RPC, TUI
-bun test test/integration   # real Responses serialization and SSE parsing
+bun test test/integration   # real Responses serialization, SSE parsing and the WebSocket channel
 bun run typecheck      # tsc --noEmit
 ```
 
 The integration tests drive `@opencode/ai/providers/openai-compatible/responses`
-over real HTTP against the mock CPA, so serialization and stream parsing are the
-host's own code rather than a stub. The host scripts additionally drive the real
-host over its HTTP RPC, both as a remote client and as a catalog reader.
+over real HTTP and `@opencode/ai/providers/openai/responses` over a real
+WebSocket against the mock CPA, so serialization, stream parsing and the
+continuation/checkpoint logic are the host's own code rather than a stub. The
+host scripts additionally drive the real host over its HTTP RPC, both as a
+remote client and as a catalog reader.
 
 ## Observations and limits
 
 - Verified on OpenCode `2.0.26` only; other versions are untested and, outside
   `>=2.0.26 <3`, refused.
-- With this runtime package the transport defaults to HTTP/SSE for a
-  plugin-registered provider; WebSocket behaviour is not validated here. The
-  priority parameter is still asserted on a WebSocket `response.create` frame
-  built by the native channel serializer, so the payload is covered even though
-  the connection lifecycle is not.
+- The priority parameter is asserted on a WebSocket `response.create` frame
+  built by the native channel serializer and on a live WebSocket session
+  (`scripts/host-transport.mjs`), so both the payload and the connection
+  lifecycle are covered.
+- Transport is selected from the directory's `prefer_websockets` flag, and only
+  the native OpenAI Responses runtime package can carry it; the compatible
+  Responses package stays HTTP-only and the plugin diagnoses that mismatch.
+- The WebSocket matrix was checked against OpenCode `2.0.26` and a mock CPA that
+  applies CPA's transcript state machine; it is not a claim about a real CPA
+  deployment.
+- The WebSocket runtime package is the native OpenAI Responses route, so it
+  applies the host's OpenAI defaults for `gpt-5*` model ids (reasoning effort
+  `medium`, reasoning summary `auto`); the HTTP-only compatible package does not.
+  The rest of the body is identical.
 - OpenCode compiles a plugin's provider registry when the location boots. No
   plugin-facing API (`provider.reload`, `model.reload`, `integration.reload`,
   re-registering the transform) makes a changed model setting reach the wire on

@@ -101,6 +101,18 @@ export type ConnectionSnapshot = {
   readonly fastEffectiveModels: number
   /** Registered models whose price is a models.dev estimate. */
   readonly costModels?: number
+  /** Effective transport asked of the host for this connection. */
+  readonly transport?: "http" | "websocket"
+  /** Why that transport was chosen. */
+  readonly transportSource?: "option" | "directory" | "default"
+  /** Whether the directory declared a WebSocket preference. */
+  readonly directoryPrefersWebSocket?: boolean
+  /** Diagnostic when the request and the runtime capability differ. */
+  readonly transportNote?: string
+  /** Compaction mechanism declared for this connection. */
+  readonly compaction?: "summary" | "native"
+  /** Diagnostic when native compaction was requested but is unavailable. */
+  readonly compactionNote?: string
   /** Increments on every connection-changing attempt. */
   readonly generation: number
   readonly updatedAt: number

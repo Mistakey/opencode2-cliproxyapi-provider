@@ -88,7 +88,8 @@ export const REQUIRED_FUNCTIONS: readonly string[] = [
   "integration.connection.resolve",
   "provider.transform",
   "rpc.register",
-  // Used to warn when a request selects a model retained as stale.
+  // Used to warn when a request selects a model retained as stale, and to reset
+  // the WebSocket continuation after a summary or a native compaction trigger.
   "session.hook",
   // The directory cache lives in the host's own plugin storage; without it a
   // restart could not reuse a matching connection's models.
