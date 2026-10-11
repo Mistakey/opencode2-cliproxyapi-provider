@@ -18,9 +18,19 @@ export const DEFAULT_PROVIDER_ID = "cliproxyapi"
 export const DEFAULT_INTEGRATION_ID = "cliproxyapi"
 export const RESPONSES_PACKAGE = "@opencode/ai/providers/openai-compatible/responses"
 
+/** Where one half of a connection came from, highest precedence first. */
+export type ConfigSource = "options" | "env" | "stored" | "default" | "wizard"
+
+/** Which explicit source supplied each half of the configured pair. */
+export interface ConfigSources {
+  readonly baseURL?: "options" | "env"
+  readonly apiKey?: "options" | "env"
+}
+
 export interface ExplicitConfig {
   readonly baseURL?: string
   readonly apiKey?: string
+  readonly sources: ConfigSources
   readonly providerID: string
   readonly providerName: string
   readonly integrationID: Integration.ID
@@ -46,9 +56,17 @@ export function readExplicitConfig(
   const opts = options ?? {}
   const envBaseURL = typeof env[ENV_BASE_URL] === "string" && env[ENV_BASE_URL]!.trim() ? env[ENV_BASE_URL]!.trim() : undefined
   const envApiKey = typeof env[ENV_API_KEY] === "string" && env[ENV_API_KEY]!.trim() ? env[ENV_API_KEY]!.trim() : undefined
+  const optionBaseURL = optionString(opts, "baseURL")
+  const optionApiKey = optionString(opts, "apiKey")
+  const baseURL = optionBaseURL ?? envBaseURL
+  const apiKey = optionApiKey ?? envApiKey
   return {
-    baseURL: optionString(opts, "baseURL") ?? envBaseURL,
-    apiKey: optionString(opts, "apiKey") ?? envApiKey,
+    baseURL,
+    apiKey,
+    sources: {
+      ...(baseURL !== undefined ? { baseURL: optionBaseURL !== undefined ? "options" : "env" } : {}),
+      ...(apiKey !== undefined ? { apiKey: optionApiKey !== undefined ? "options" : "env" } : {}),
+    } as ConfigSources,
     providerID: optionString(opts, "providerID") ?? DEFAULT_PROVIDER_ID,
     providerName: optionString(opts, "providerName") ?? "CLIProxyAPI",
     integrationID: Integration.ID.make(optionString(opts, "integrationID") ?? DEFAULT_INTEGRATION_ID),
@@ -85,6 +103,10 @@ export interface ConnectionPlan {
   readonly address: string
   /** Whether the explicit pair must be written to the native credential store. */
   readonly store: boolean
+  /** Where the effective address came from, so the active source is never implicit. */
+  readonly addressSource: ConfigSource
+  /** Where the effective key came from. */
+  readonly keySource: ConfigSource
 }
 
 export type ConnectionPlanResult = { ok: true; plan: ConnectionPlan } | { ok: false; reason: string }
@@ -97,10 +119,11 @@ export type ConnectionPlanResult = { ok: true; plan: ConnectionPlan } | { ok: fa
  * stored address only fills a gap an explicit configuration leaves open.
  */
 export function planConnection(input: {
-  explicit: Pick<ExplicitConfig, "baseURL" | "apiKey">
+  explicit: Pick<ExplicitConfig, "baseURL" | "apiKey"> & { sources?: ConfigSources }
   active?: ResolvedCredential<unknown>
 }): ConnectionPlanResult {
   const { explicit, active } = input
+  const sources = explicit.sources ?? {}
   const hasExplicit = explicit.baseURL !== undefined || explicit.apiKey !== undefined
 
   if (!hasExplicit) {
@@ -110,17 +133,34 @@ export function planConnection(input: {
     if (!active.baseURL) {
       return { ok: false, reason: "stored CPA connection has no address; configure baseURL or connect again" }
     }
-    return { ok: true, plan: { mode: "connection", key: active.key, address: active.baseURL, store: false } }
+    return {
+      ok: true,
+      plan: {
+        mode: "connection",
+        key: active.key,
+        address: active.baseURL,
+        store: false,
+        addressSource: "stored",
+        keySource: "stored",
+      },
+    }
   }
 
+  // A configured address with no key anywhere is a partial configuration: it is
+  // refused rather than completed from an unrelated source. A configured key
+  // without an address keeps the stored address when there is one, and is
+  // otherwise reported as the default address.
   const key = explicit.apiKey ?? active?.key
   if (!key) {
     return { ok: false, reason: `CPA address is configured without an API key; set ${ENV_API_KEY}` }
   }
+  const keySource: ConfigSource = explicit.apiKey !== undefined ? (sources.apiKey ?? "options") : "stored"
+  const addressSource: ConfigSource =
+    explicit.baseURL !== undefined ? (sources.baseURL ?? "options") : active?.baseURL ? "stored" : "default"
   const address = explicit.baseURL ?? active?.baseURL ?? DEFAULT_BASE_URL
   const store =
-    explicit.apiKey !== undefined && (active === undefined || active.key !== explicit.apiKey || active.baseURL !== address)
-  return { ok: true, plan: { mode: "explicit", key, address, store } }
+    keySource !== "stored" && (active === undefined || active.key !== key || active.baseURL !== address)
+  return { ok: true, plan: { mode: "explicit", key, address, store, addressSource, keySource } }
 }
 
 /** Never render a key: logs and errors may only carry its length. */

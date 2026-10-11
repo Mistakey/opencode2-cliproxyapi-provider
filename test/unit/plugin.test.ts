@@ -105,7 +105,8 @@ describe("plugin setup", () => {
 
     expect(host.connectCalls).toHaveLength(1)
     expect(host.credentials).toHaveLength(1)
-    expect(host.providers).toHaveLength(2)
+    // The provider is registered once per provider id; the second setup replaces it.
+    expect(host.providers).toHaveLength(1)
   })
 
   test("never writes the key into logs or provider settings", async () => {
@@ -152,7 +153,7 @@ describe("plugin setup", () => {
     await setup(host.ctx)
     host.restoreConsole()
     expect(host.providers).toHaveLength(0)
-    expect(host.logs.join("\n")).toContain("directory unavailable")
+    expect(host.logs.join("\n")).toContain("connection saved but not verified")
     expect(host.logs.join("\n")).toContain("503")
     expect(host.logs.join("\n")).not.toContain(API_KEY)
 
@@ -172,7 +173,7 @@ describe("plugin setup", () => {
     await setup(host.ctx)
     host.restoreConsole()
     expect(host.providers).toHaveLength(0)
-    expect(host.logs.join("\n")).toContain("directory unavailable")
+    expect(host.logs.join("\n")).toContain("connection saved but not verified")
   })
 
   test("accepts a plain OpenAI listing when the enhanced directory is not served", async () => {

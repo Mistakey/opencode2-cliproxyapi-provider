@@ -18,6 +18,8 @@ export interface FakeHost {
   credentials: FakeCredential[]
   providers: Record<string, unknown>[]
   connectCalls: { integrationID: string; key: string; answer?: Record<string, string> }[]
+  rpcRegistrations: { definition: { id: string; methods: Record<string, unknown> }; handlers: Record<string, unknown> }[]
+  rpcEvents: { name: string; data: unknown }[]
   logs: string[]
   restoreConsole: () => void
 }
@@ -34,18 +36,36 @@ export function createFakeHost(options: {
   options?: Record<string, unknown>
   omit?: string[]
   credentials?: FakeCredential[]
+  location?: string
 } = {}): FakeHost {
   const integrations: FakeHost["integrations"] = []
   const credentials: FakeCredential[] = options.credentials ?? []
   const providers: Record<string, unknown>[] = []
   const connectCalls: FakeHost["connectCalls"] = []
+  const rpcRegistrations: FakeHost["rpcRegistrations"] = []
+  const rpcEvents: FakeHost["rpcEvents"] = []
   const logs: string[] = []
 
   let nextCredential = credentials.length + 1
 
   const ctx: Record<string, unknown> = {
     app: { name: "opencode", version: options.version ?? "2.0.26", channel: "latest" },
+    location: { directory: options.location ?? "/fake/location" },
     options: options.options ?? {},
+    rpc: {
+      register: async (
+        definition: { id: string; methods: Record<string, unknown> },
+        handlers: Record<string, unknown>,
+      ) => {
+        const events = {
+          emit: async (name: string, data: unknown) => {
+            rpcEvents.push({ name, data })
+          },
+        }
+        rpcRegistrations.push({ definition, handlers })
+        return { dispose: async () => undefined, events }
+      },
+    },
     integration: {
       transform: async (callback: (editor: unknown) => void) => {
         const editor = {
@@ -107,7 +127,12 @@ export function createFakeHost(options: {
           list: () => providers,
           get: (providerID: string) =>
             providers.find((entry) => (entry.provider as { id?: string } | undefined)?.id === providerID),
-          add: (input: Record<string, unknown>) => providers.push(input),
+          add: (input: Record<string, unknown>) => {
+            const id = (input.info as { id?: string } | undefined)?.id
+            const index = providers.findIndex((entry) => (entry.info as { id?: string } | undefined)?.id === id)
+            if (index >= 0) providers.splice(index, 1, input)
+            else providers.push(input)
+          },
           update: () => undefined,
           remove: () => undefined,
           models: { set: () => undefined, update: () => undefined, remove: () => undefined },
@@ -136,6 +161,8 @@ export function createFakeHost(options: {
     credentials,
     providers,
     connectCalls,
+    rpcRegistrations,
+    rpcEvents,
     logs,
     restoreConsole: () => {
       console.log = originals.log

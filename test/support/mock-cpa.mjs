@@ -122,7 +122,9 @@ function sendReply(res, reply) {
  * Start the mock on an ephemeral port.
  *
  * `directory` and `responses` may be a reply object or a function of the
- * recorded request. `models` is shorthand for an enhanced directory listing.
+ * recorded request, and the function may return a promise so a test can delay
+ * one request while another is in flight. `models` is shorthand for an
+ * enhanced directory listing.
  */
 export async function startMockCpa(options = {}) {
   const requests = []
@@ -132,7 +134,7 @@ export async function startMockCpa(options = {}) {
   const server = createServer((req, res) => {
     const chunks = []
     req.on("data", (chunk) => chunks.push(chunk))
-    req.on("end", () => {
+    req.on("end", async () => {
       const raw = Buffer.concat(chunks).toString("utf8")
       let json
       try {
@@ -153,12 +155,12 @@ export async function startMockCpa(options = {}) {
       requests.push(record)
 
       if (req.method === "GET" && url.pathname.endsWith("/models")) {
-        sendReply(res, typeof directoryReply === "function" ? directoryReply(record) : directoryReply)
+        sendReply(res, await (typeof directoryReply === "function" ? directoryReply(record) : directoryReply))
         return
       }
       if (req.method === "POST" && url.pathname.endsWith("/responses")) {
         const index = requests.filter((entry) => entry.method === "POST").length - 1
-        sendReply(res, typeof responsesReply === "function" ? responsesReply(record, index) : responsesReply)
+        sendReply(res, await (typeof responsesReply === "function" ? responsesReply(record, index) : responsesReply))
         return
       }
       sendReply(res, { status: 404, body: { error: "not found" } })

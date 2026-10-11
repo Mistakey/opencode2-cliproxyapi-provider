@@ -5,6 +5,8 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "moduleDetection": "force",
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
     "resolveJsonModule": true,
@@ -13,5 +15,5 @@
     "skipLibCheck": true,
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"]
 }
