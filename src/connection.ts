@@ -10,6 +10,7 @@
 import { Integration } from "@opencode/plugin"
 import type { Credential } from "@opencode/plugin"
 import { DEFAULT_BASE_URL } from "./address"
+import { WEBSOCKET_RUNTIME_PACKAGE, readCompactionPreference, readTransportPreference, type CompactionPreference, type TransportPreference } from "./transport"
 
 export const ENV_BASE_URL = "CLIPROXYAPI_BASE_URL"
 export const ENV_API_KEY = "CLIPROXYAPI_API_KEY"
@@ -35,6 +36,13 @@ export interface ExplicitConfig {
   readonly providerName: string
   readonly integrationID: Integration.ID
   readonly package: string
+  readonly websocketPackage: string
+  readonly transport: TransportPreference
+  /** Set when the configured `transport` value was not accepted. */
+  readonly transportInvalid?: string
+  readonly compaction: CompactionPreference
+  /** Set when the configured `compaction` value was not accepted. */
+  readonly compactionInvalid?: string
   readonly catalogTimeoutMs?: number
 }
 
@@ -60,6 +68,8 @@ export function readExplicitConfig(
   const optionApiKey = optionString(opts, "apiKey")
   const baseURL = optionBaseURL ?? envBaseURL
   const apiKey = optionApiKey ?? envApiKey
+  const transport = readTransportPreference(opts)
+  const compaction = readCompactionPreference(opts)
   return {
     baseURL,
     apiKey,
@@ -71,6 +81,11 @@ export function readExplicitConfig(
     providerName: optionString(opts, "providerName") ?? "CLIProxyAPI",
     integrationID: Integration.ID.make(optionString(opts, "integrationID") ?? DEFAULT_INTEGRATION_ID),
     package: optionString(opts, "package") ?? RESPONSES_PACKAGE,
+    websocketPackage: optionString(opts, "websocketPackage") ?? WEBSOCKET_RUNTIME_PACKAGE,
+    transport: transport.preference,
+    ...(transport.invalid !== undefined ? { transportInvalid: transport.invalid } : {}),
+    compaction: compaction.preference,
+    ...(compaction.invalid !== undefined ? { compactionInvalid: compaction.invalid } : {}),
     catalogTimeoutMs: optionPositiveNumber(opts, "catalogTimeoutMs"),
   }
 }

@@ -39,6 +39,46 @@ describe("ConnectionState", () => {
     expect(state.isCurrent(first)).toBe(false)
   })
 
+  test("a later update without a transport or compaction note clears the earlier one", () => {
+    const state = new ConnectionState(initial)
+    const generation = state.begin()
+    state.commit(
+      generation,
+      connectionUpdate({
+        address: "http://a.test",
+        addressSource: "options",
+        keySource: "options",
+        key: API_KEY,
+        keySaved: true,
+        verified: "failed",
+        transport: "websocket",
+        transportSource: "option",
+        transportNote: "no channel",
+        compaction: "summary",
+        compactionNote: "no endpoint",
+      }),
+    )
+    expect(state.read().transportNote).toBe("no channel")
+    expect(state.read().compactionNote).toBe("no endpoint")
+
+    state.commit(
+      generation,
+      connectionUpdate({
+        address: "http://a.test",
+        addressSource: "options",
+        keySource: "options",
+        key: API_KEY,
+        keySaved: true,
+        verified: "ok",
+        transport: "http",
+        transportSource: "default",
+      }),
+    )
+    expect(state.read().transport).toBe("http")
+    expect(state.read().transportNote).toBeUndefined()
+    expect(state.read().compactionNote).toBeUndefined()
+  })
+
   test("clears a field set to undefined instead of leaving an undefined value", () => {
     const state = new ConnectionState(initial)
     const generation = state.begin()

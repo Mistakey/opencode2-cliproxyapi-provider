@@ -82,6 +82,17 @@ describe("parseCatalogPayload", () => {
     expect(() => parseCatalogPayload(null)).toThrow(CatalogError)
     expect(() => parseCatalogPayload({ error: "boom" })).toThrow(CatalogError)
   })
+  test("reads the WebSocket preference only when the directory declares a boolean", () => {
+    const entries = parseCatalogPayload({
+      models: [
+        { slug: "codex", prefer_websockets: true },
+        { slug: "plain", prefer_websockets: false },
+        { slug: "unknown" },
+        { slug: "textual", prefer_websockets: "true" },
+      ],
+    })
+    expect(entries.map((entry) => entry.preferWebsockets)).toEqual([true, false, undefined, undefined])
+  })
 })
 
 describe("toModelInfo", () => {

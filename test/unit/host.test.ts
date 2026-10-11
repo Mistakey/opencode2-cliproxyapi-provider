@@ -22,6 +22,7 @@ function completeContext(): Record<string, unknown> {
     },
     provider: { transform: fn },
     rpc: { register: fn },
+    session: { hook: fn },
   }
 }
 

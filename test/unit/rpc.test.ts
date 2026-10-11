@@ -158,7 +158,7 @@ describe("CPA connection RPC", () => {
     const provider = host.providers[0] as { models: { id: string }[]; info: { settings: unknown } }
     expect(firstProvider.models.map((model) => model.id)).toEqual(["old-model"])
     expect(provider.models.map((model) => model.id)).toEqual(["new-model"])
-    expect(provider.info.settings).toEqual({ baseURL: `${mock.url}/v1` })
+    expect(provider.info.settings).toEqual({ baseURL: `${mock.url}/v1`, transport: "http", compaction: { type: "summary" } })
 
     // The directory request for the new connection carried the new pair.
     const directory = mock.requests.find((request) => request.method === "GET")

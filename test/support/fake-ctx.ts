@@ -20,6 +20,7 @@ export interface FakeHost {
   connectCalls: { integrationID: string; key: string; answer?: Record<string, string> }[]
   rpcRegistrations: { definition: { id: string; methods: Record<string, unknown> }; handlers: Record<string, unknown> }[]
   rpcEvents: { name: string; data: unknown }[]
+  hooks: { name: string; callback: (input: never) => unknown; options?: Record<string, unknown> }[]
   logs: string[]
   restoreConsole: () => void
 }
@@ -44,6 +45,7 @@ export function createFakeHost(options: {
   const connectCalls: FakeHost["connectCalls"] = []
   const rpcRegistrations: FakeHost["rpcRegistrations"] = []
   const rpcEvents: FakeHost["rpcEvents"] = []
+  const hooks: FakeHost["hooks"] = []
   const logs: string[] = []
 
   let nextCredential = credentials.length + 1
@@ -141,6 +143,12 @@ export function createFakeHost(options: {
         return { dispose: async () => undefined }
       },
     },
+    session: {
+      hook: async (name: string, callback: (input: never) => unknown, options?: Record<string, unknown>) => {
+        hooks.push({ name, callback, ...(options ? { options } : {}) })
+        return { dispose: async () => undefined }
+      },
+    },
   }
 
   for (const path of options.omit ?? []) deletePath(ctx, path)
@@ -163,6 +171,7 @@ export function createFakeHost(options: {
     connectCalls,
     rpcRegistrations,
     rpcEvents,
+    hooks,
     logs,
     restoreConsole: () => {
       console.log = originals.log

@@ -87,6 +87,18 @@ export type ConnectionSnapshot = {
   readonly verifyMessage?: string
   /** Model count from the last successful directory read; `undefined` when never verified. */
   readonly catalogModels?: number
+  /** Effective transport asked of the host for this connection. */
+  readonly transport?: "http" | "websocket"
+  /** Why that transport was chosen. */
+  readonly transportSource?: "option" | "directory" | "default"
+  /** Whether the directory declared a WebSocket preference. */
+  readonly directoryPrefersWebSocket?: boolean
+  /** Diagnostic when the request and the runtime capability differ. */
+  readonly transportNote?: string
+  /** Compaction mechanism declared for this connection. */
+  readonly compaction?: "summary" | "native"
+  /** Diagnostic when native compaction was requested but is unavailable. */
+  readonly compactionNote?: string
   /** Increments on every connection-changing attempt. */
   readonly generation: number
   readonly updatedAt: number
@@ -164,6 +176,12 @@ export function connectionUpdate(input: {
   verifyKind?: VerifyKind
   verifyMessage?: string
   catalogModels?: number
+  transport?: ConnectionSnapshot["transport"]
+  transportSource?: ConnectionSnapshot["transportSource"]
+  directoryPrefersWebSocket?: boolean
+  transportNote?: string
+  compaction?: ConnectionSnapshot["compaction"]
+  compactionNote?: string
 }): ConnectionUpdate {
   return {
     address: input.address,
@@ -176,5 +194,12 @@ export function connectionUpdate(input: {
     verifyKind: input.verifyKind,
     verifyMessage: input.verifyMessage,
     ...(input.catalogModels !== undefined ? { catalogModels: input.catalogModels } : {}),
+    // Always written too: a later state without a note must clear the old one.
+    transport: input.transport,
+    transportSource: input.transportSource,
+    directoryPrefersWebSocket: input.directoryPrefersWebSocket,
+    transportNote: input.transportNote,
+    compaction: input.compaction,
+    compactionNote: input.compactionNote,
   }
 }

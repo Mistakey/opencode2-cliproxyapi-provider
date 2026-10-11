@@ -33,6 +33,8 @@ export interface CatalogEntry {
   readonly inputModalities?: readonly string[]
   readonly reasoningLevels?: readonly string[]
   readonly hidden?: boolean
+  /** The directory asks for a WebSocket transport for this model. */
+  readonly preferWebsockets?: boolean
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -97,6 +99,8 @@ function parseEntry(value: unknown): CatalogEntry | undefined {
     inputModalities: normalizeModalities(value.input_modalities),
     reasoningLevels: normalizeReasoningLevels(value.supported_reasoning_levels),
     hidden: visibility === "hide",
+    // Only an explicit boolean is a preference; a missing field stays unknown.
+    preferWebsockets: typeof value.prefer_websockets === "boolean" ? value.prefer_websockets : undefined,
   }
 }
 

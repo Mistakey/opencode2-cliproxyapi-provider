@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import plugin from "../../src/index"
 import { RESPONSES_PACKAGE } from "../../src/connection"
+import { WEBSOCKET_RUNTIME_PACKAGE } from "../../src/transport"
 import { createFakeHost, type FakeHost } from "../support/fake-ctx"
 import { startMockCpa } from "../support/mock-cpa.mjs"
 
@@ -80,7 +81,7 @@ describe("plugin setup", () => {
     expect(provider.info.activation).toBe("enabled")
     expect(provider.info.integrationID).toBe("cliproxyapi")
     expect(provider.info.package).toBe(RESPONSES_PACKAGE)
-    expect(provider.info.settings).toEqual({ baseURL: `${mock.url}/v1` })
+    expect(provider.info.settings).toEqual({ baseURL: `${mock.url}/v1`, transport: "http", compaction: { type: "summary" } })
     expect(provider.models.map((model) => model.id)).toEqual(["gpt-5.2-codex", "hidden-model"])
     expect(provider.models.map((model) => model.modelID)).toEqual(["gpt-5.2-codex", "hidden-model"])
     expect(provider.models.map((model) => model.enabled)).toEqual([true, false])
@@ -192,5 +193,90 @@ describe("plugin setup", () => {
     host.restoreConsole()
     expect(host.providers).toHaveLength(0)
     expect(host.logs.join("\n")).toContain("must use http or https")
+  })
+
+  test("asks for WebSocket only when the directory declares it and the runtime can carry it", async () => {
+    mock = await startMockCpa({ models: [{ slug: "codex", prefer_websockets: true }, { slug: "plain" }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { package: string; settings: unknown } }
+    expect(provider.info.package).toBe(WEBSOCKET_RUNTIME_PACKAGE)
+    expect(provider.info.settings).toEqual({ baseURL: `${mock.url}/v1`, transport: "websocket", compaction: { type: "summary" } })
+    expect(host.logs.join("\n")).toContain("transport websocket")
+  })
+
+  test("keeps HTTP when the directory asks for WebSocket but the runtime package cannot carry it", async () => {
+    mock = await startMockCpa({ models: [{ slug: "codex", prefer_websockets: true }] })
+    host = createFakeHost({
+      options: { baseURL: mock.url, apiKey: API_KEY, websocketPackage: RESPONSES_PACKAGE },
+    })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { package: string; settings: unknown } }
+    expect(provider.info.package).toBe(RESPONSES_PACKAGE)
+    expect(provider.info.settings).toEqual({ baseURL: `${mock.url}/v1`, transport: "http", compaction: { type: "summary" } })
+    expect(host.logs.join("\n")).toContain("not a confirmed WebSocket runtime")
+  })
+
+  test("a forced WebSocket keeps the request and diagnoses an HTTP-only package", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({
+      options: { baseURL: mock.url, apiKey: API_KEY, transport: "websocket", websocketPackage: RESPONSES_PACKAGE },
+    })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { transport?: string } } }
+    expect(provider.info.settings.transport).toBe("websocket")
+    expect(host.logs.join("\n")).toContain("has no WebSocket channel")
+  })
+
+  test("refuses an unknown transport value instead of guessing silently", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, transport: "ws" } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { transport?: string } } }
+    expect(provider.info.settings.transport).toBe("http")
+    expect(host.logs.join("\n")).toContain("transport must be one of")
+  })
+
+  test("native compaction is declared only for the runtime package that exposes it", async () => {
+    mock = await startMockCpa({ models: [{ slug: "codex", prefer_websockets: true }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, compaction: "native" } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { compaction?: unknown } } }
+    expect(provider.info.settings.compaction).toEqual({ type: "native" })
+  })
+
+  test("a native request against an HTTP-only runtime keeps summary and says why", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, compaction: "native" } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { info: { settings: { compaction?: unknown } } }
+    expect(provider.info.settings.compaction).toEqual({ type: "summary" })
+    expect(host.logs.join("\n")).toContain("exposes no compaction endpoint")
+  })
+
+  test("registers the summary and handshake hooks and never an HTTP hook", async () => {
+    mock = await startMockCpa({ models })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    expect(host.hooks.map((hook) => hook.name).sort()).toEqual([
+      "compaction",
+      "experimental.ws.handshake",
+      "experimental.ws.send",
+    ])
+    expect(host.hooks.every((hook) => hook.options?.providerID === "cliproxyapi")).toBe(true)
   })
 })
