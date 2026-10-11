@@ -36,6 +36,10 @@ export interface ExplicitConfig {
   readonly integrationID: Integration.ID
   readonly package: string
   readonly catalogTimeoutMs?: number
+  /** Price estimate source; `false` disables the models.dev lookup. */
+  readonly modelsDev?: boolean
+  readonly modelsDevURL?: string
+  readonly modelsDevTimeoutMs?: number
 }
 
 function optionString(options: Record<string, unknown>, key: string): string | undefined {
@@ -46,6 +50,11 @@ function optionString(options: Record<string, unknown>, key: string): string | u
 function optionPositiveNumber(options: Record<string, unknown>, key: string): number | undefined {
   const value = options[key]
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined
+}
+
+function optionBoolean(options: Record<string, unknown>, key: string): boolean | undefined {
+  const value = options[key]
+  return typeof value === "boolean" ? value : undefined
 }
 
 /** Read explicit, no-UI configuration: plugin options first, then environment. */
@@ -72,6 +81,9 @@ export function readExplicitConfig(
     integrationID: Integration.ID.make(optionString(opts, "integrationID") ?? DEFAULT_INTEGRATION_ID),
     package: optionString(opts, "package") ?? RESPONSES_PACKAGE,
     catalogTimeoutMs: optionPositiveNumber(opts, "catalogTimeoutMs"),
+    modelsDev: optionBoolean(opts, "modelsDev"),
+    modelsDevURL: optionString(opts, "modelsDevURL"),
+    modelsDevTimeoutMs: optionPositiveNumber(opts, "modelsDevTimeoutMs"),
   }
 }
 

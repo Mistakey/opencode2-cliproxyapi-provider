@@ -14,6 +14,7 @@ export interface ConnectionRpc {
   readonly status: (input?: unknown) => Promise<unknown>
   readonly verify: (input: { address: string; key?: string }) => Promise<unknown>
   readonly connect: (input: { address: string; key: string }) => Promise<unknown>
+  readonly setFast: (input: { enabled: boolean }) => Promise<unknown>
   readonly events: {
     readonly on: (name: "changed", handler: (event: { location?: { directory?: string } | undefined }) => void) => () => void
   }
@@ -21,7 +22,8 @@ export interface ConnectionRpc {
 
 export interface ConnectionReport {
   readonly ok: boolean
-  readonly kind: string
+  /** Present on verify/connect results; a Fast toggle reports no kind. */
+  readonly kind?: string
   readonly message?: string
   readonly models?: number
   readonly snapshot?: ConnectionSnapshot
@@ -43,7 +45,7 @@ export function parseSnapshot(value: unknown): ConnectionSnapshot | undefined {
 
 export function parseReport(value: unknown): ConnectionReport | undefined {
   if (!isRecord(value)) return undefined
-  if (typeof value.ok !== "boolean" || typeof value.kind !== "string") return undefined
+  if (typeof value.ok !== "boolean") return undefined
   return value as unknown as ConnectionReport
 }
 
@@ -60,11 +62,23 @@ export function matchesLocation(
 export function describeConnection(snapshot: ConnectionSnapshot | undefined, connected: boolean): string {
   if (!connected) return "CPA offline"
   if (!snapshot) return "CPA not configured"
-  if (snapshot.verified === "ok") {
-    return snapshot.catalogModels === 0 ? "CPA empty" : `CPA ${snapshot.catalogModels ?? "?"} models`
-  }
-  if (snapshot.verified === "failed") return `CPA ${snapshot.verifyKind ?? "failed"}`
-  return snapshot.keySaved ? "CPA saved" : "CPA not configured"
+  const connection =
+    snapshot.verified === "ok"
+      ? snapshot.catalogModels === 0
+        ? "CPA empty"
+        : `CPA ${snapshot.catalogModels ?? "?"} models`
+      : snapshot.verified === "failed"
+        ? `CPA ${snapshot.verifyKind ?? "failed"}`
+        : snapshot.keySaved
+          ? "CPA saved"
+          : "CPA not configured"
+  return `${connection} · ${describeFast(snapshot)}`
+}
+
+/** The Fast preference and its effect are different states and are shown as such. */
+export function describeFast(snapshot: ConnectionSnapshot): string {
+  if (!snapshot.fastEnabled) return "Fast off"
+  return snapshot.fastEffectiveModels > 0 ? `Fast on (${snapshot.fastEffectiveModels})` : "Fast on (no capable model)"
 }
 
 /** Longer text for the status dialog, still free of key material. */
@@ -81,6 +95,8 @@ export function describeDetail(
     `saved: ${snapshot.keySaved ? "yes" : "no"}`,
     `verified: ${snapshot.verified === "failed" && snapshot.verifyKind ? `failed (${snapshot.verifyKind})` : snapshot.verified}`,
     `models: ${snapshot.catalogModels ?? "(unknown)"}`,
+    `fast: ${snapshot.fastEnabled ? "on" : "off"} (effective on ${snapshot.fastEffectiveModels} model(s))`,
+    `prices: models.dev estimate for ${snapshot.costModels ?? 0} model(s), not a CPA bill`,
     `generation: ${snapshot.generation}`,
   ]
   if (snapshot.verifyMessage) lines.push(`detail: ${snapshot.verifyMessage}`)
@@ -97,11 +113,15 @@ export interface ConnectionView {
   subscribe(): () => void
   verify(address: string, key?: string): Promise<ConnectionReport>
   connect(address: string, key: string): Promise<ConnectionReport>
+  /** Persist the Fast preference and reload the location so it reaches the wire. */
+  setFast(enabled: boolean): Promise<ConnectionReport>
 }
 
 export function createConnectionView(input: {
   rpc: ConnectionRpc
   directory?: string
+  /** Reloads the location so a persisted preference is recompiled. */
+  reload?: () => Promise<void>
   onUpdate?: () => void
 }): ConnectionView {
   let snapshot: ConnectionSnapshot | undefined
@@ -150,6 +170,20 @@ export function createConnectionView(input: {
       return applyReport(report)
     },
     connect: async (address, key) => applyReport(parseReport(await input.rpc.connect({ address, key }))),
+    setFast: async (enabled) => {
+      const report = parseReport(await input.rpc.setFast({ enabled }))
+      // The host compiles the provider registry when the location boots, so the
+      // persisted preference only reaches the wire after this reload. A reload
+      // failure is not fatal: the preference is already stored and applies on
+      // the next boot.
+      try {
+        await input.reload?.()
+      } catch {
+        // Reported through the refreshed snapshot instead of failing the toggle.
+      }
+      await refresh()
+      return report ?? { ok: false, kind: "unreachable", message: "the server returned an unexpected response" }
+    },
   }
 }
 

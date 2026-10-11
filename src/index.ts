@@ -7,11 +7,18 @@
  * exposes the connection through a small RPC so a TUI or another client can
  * read a snapshot, verify a candidate pair and switch connection without
  * talking to CPA itself.
+ *
+ * Runtime parameters follow the same rule as the connection: the directory
+ * declares what a model supports, the plugin maps it onto v2 model settings
+ * (reasoning variants, the Fast `serviceTier`), and OpenCode's runtime does the
+ * serialization. No HTTP body hook is registered, so the transport choice is
+ * never altered by the plugin.
  */
 
 import { Plugin, Provider } from "@opencode/plugin"
+import type { Model } from "@opencode/plugin"
 import { DEFAULT_BASE_URL, AddressError, resolveEndpoints } from "./address"
-import { toModelInfos } from "./catalog"
+import { fastEffectiveCount, toModelInfos, type CatalogEntry } from "./catalog"
 import {
   planConnection,
   readCredential,
@@ -20,12 +27,18 @@ import {
   type ConnectionPlan,
   type ExplicitConfig,
 } from "./connection"
+import { matchModelCost, toModelCost, type ModelsDevCatalog } from "./cost"
+import { fastStorageKey, readFastPreference, writeFastPreference } from "./fast"
 import { PLUGIN_ID, describeIssues, inspectHost } from "./host"
+import { DEFAULT_MODELS_DEV_URL, fetchModelsDevCatalog } from "./models-dev"
 import { CpaRpc } from "./rpc"
 import { ConnectionState, connectionUpdate, verifyConnection, type ConnectionUpdate } from "./state"
 
 /** The host context this plugin registers against. */
 type Context = Parameters<Parameters<typeof Plugin.define>[0]["setup"]>[0]
+
+/** An active CPA connection as the host reports it. */
+type ActiveConnection = Awaited<ReturnType<Context["integration"]["connection"]["active"]>>
 
 /** The registered CPA RPC, narrowed to what this plugin emits. */
 interface CpaRegistration {
@@ -74,8 +87,8 @@ async function bindProvider(
     integrationID: ExplicitConfig["integrationID"]
     packageID: string
     baseURL: string
-    models: ReturnType<typeof toModelInfos>
-    sourceConnection?: Awaited<ReturnType<Context["integration"]["connection"]["active"]>>
+    models: Model.Info[]
+    sourceConnection?: ActiveConnection
   },
 ): Promise<void> {
   await ctx.provider.transform((editor) => {
@@ -100,6 +113,29 @@ function readString(input: unknown, key: string): string | undefined {
   if (typeof value !== "string") return undefined
   const trimmed = value.trim()
   return trimmed ? trimmed : undefined
+}
+
+function readBoolean(input: unknown, key: string): boolean | undefined {
+  if (typeof input !== "object" || input === null) return undefined
+  const value = (input as Record<string, unknown>)[key]
+  return typeof value === "boolean" ? value : undefined
+}
+
+/**
+ * Load the models.dev price catalog. It is a supplement: a failure is reported
+ * once and the models are registered without a price estimate.
+ */
+async function loadCostCatalog(explicit: ExplicitConfig): Promise<{ catalog?: ModelsDevCatalog }> {
+  if (explicit.modelsDev === false) return {}
+  const result = await fetchModelsDevCatalog({
+    url: explicit.modelsDevURL ?? DEFAULT_MODELS_DEV_URL,
+    ...(explicit.modelsDevTimeoutMs !== undefined ? { timeoutMs: explicit.modelsDevTimeoutMs } : {}),
+  })
+  if (!result.ok) {
+    console.warn(`[${PLUGIN_ID}] models.dev price estimate unavailable: ${result.message}`)
+    return {}
+  }
+  return { catalog: result.catalog }
 }
 
 export default Plugin.define({
@@ -136,6 +172,12 @@ async function setupConnection(ctx: Context) {
     ? readCredential(activeConnection, await ctx.integration.connection.resolve(activeConnection))
     : undefined
 
+  // Fast is a durable, provider-scoped preference. It decides whether a model
+  // that declares service tiers is asked for priority; it never changes the
+  // reasoning variant.
+  const fastKey = fastStorageKey(String(providerID))
+  let fastEnabled = await readFastPreference(ctx.storage, fastKey)
+
   const state = new ConnectionState({
     location,
     providerID: String(providerID),
@@ -143,12 +185,59 @@ async function setupConnection(ctx: Context) {
     keyHint: activeCredential ? redactKey(activeCredential.key) : "(none)",
     keySaved: activeCredential !== undefined,
     verified: "unknown",
+    fastEnabled,
+    fastEffectiveModels: 0,
   })
+
+  // Price is a supplement, never a gate: the lookup runs beside the directory
+  // request, and a failure only means the models carry no price estimate.
+  const costPromise = loadCostCatalog(explicit)
+  let costCatalog: ModelsDevCatalog | undefined
 
   let registration: CpaRegistration | undefined
   const publish = async (update: ConnectionUpdate, generation: number): Promise<void> => {
     if (!state.commit(generation, update)) return
     await registration?.events.emit("changed", state.read())
+  }
+
+  const modelsFor = (entries: readonly CatalogEntry[]): Model.Info[] =>
+    toModelInfos(providerID, entries, {
+      fast: fastEnabled,
+      cost: (entry) => {
+        if (!costCatalog) return undefined
+        const cost = matchModelCost(entry.id, costCatalog, fastEnabled)
+        return cost ? toModelCost(cost) : undefined
+      },
+    })
+
+  /**
+   * Register the directory's models for the active connection.
+   *
+   * OpenCode compiles the provider registry when the location boots, so this
+   * runs during setup and after a connection change; a Fast preference change
+   * is applied by the location reload that follows it, not by re-registering
+   * here.
+   */
+  const bindCatalog = async (input: {
+    baseURL: string
+    entries: readonly CatalogEntry[]
+    sourceConnection?: ActiveConnection
+  }): Promise<{ fastEffectiveModels: number; costModels: number }> => {
+    costCatalog ??= (await costPromise).catalog
+    const models = modelsFor(input.entries)
+    await bindProvider(ctx, {
+      providerID,
+      providerName: explicit.providerName,
+      integrationID,
+      packageID: explicit.package,
+      baseURL: input.baseURL,
+      models,
+      ...(input.sourceConnection ? { sourceConnection: input.sourceConnection } : {}),
+    })
+    return {
+      fastEffectiveModels: fastEffectiveCount(input.entries, fastEnabled),
+      costModels: models.filter((model) => (model.cost?.length ?? 0) > 0).length,
+    }
   }
 
   registration = await ctx.rpc.register(CpaRpc, {
@@ -231,26 +320,25 @@ async function setupConnection(ctx: Context) {
       await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
       const connection = await ctx.integration.connection.active(integrationID)
       const endpoints = resolveEndpoints(address)
-      await bindProvider(ctx, {
-        providerID,
-        providerName: explicit.providerName,
-        integrationID,
-        packageID: explicit.package,
+      const stats = await bindCatalog({
         baseURL: endpoints.baseURL,
-        models: toModelInfos(providerID, outcome.entries),
+        entries: outcome.entries,
         ...(connection ? { sourceConnection: connection } : {}),
       })
       await publish(
-        connectionUpdate({
-          address,
-          addressSource: "wizard",
-          keySource: "wizard",
-          key,
-          keySaved: true,
-          verified: "ok",
-          verifyKind: outcome.kind,
-          catalogModels: outcome.entries.length,
-        }),
+        {
+          ...connectionUpdate({
+            address,
+            addressSource: "wizard",
+            keySource: "wizard",
+            key,
+            keySaved: true,
+            verified: "ok",
+            verifyKind: outcome.kind,
+            catalogModels: outcome.entries.length,
+          }),
+          ...stats,
+        },
         generation,
       )
       return {
@@ -259,6 +347,28 @@ async function setupConnection(ctx: Context) {
         models: outcome.entries.length,
         snapshot: state.read(),
       }
+    },
+
+    // Persist the Fast preference. The registered models only change when the
+    // host rebuilds the provider registry, which is a location reload (or a
+    // service restart); the snapshot keeps preference and effective state apart.
+    setFast: async (input) => {
+      const enabled = readBoolean(input, "enabled")
+      if (enabled === undefined) {
+        return { ok: false, message: "enabled must be a boolean", snapshot: state.read() }
+      }
+      if (enabled !== fastEnabled) {
+        fastEnabled = enabled
+        try {
+          await writeFastPreference(ctx.storage, fastKey, enabled)
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          console.warn(`[${PLUGIN_ID}] could not persist the Fast preference: ${detail}`)
+        }
+        state.patch({ fastEnabled })
+        await registration?.events.emit("changed", state.read())
+      }
+      return { ok: true, snapshot: state.read() }
     },
   })
 
@@ -341,22 +451,16 @@ async function setupConnection(ctx: Context) {
     return cleanup
   }
 
-  const models = toModelInfos(providerID, outcome.entries)
   const sourceConnection = plan.store
     ? ((await ctx.integration.connection.active(integrationID)) ?? activeConnection)
     : activeConnection
-  await bindProvider(ctx, {
-    providerID,
-    providerName: explicit.providerName,
-    integrationID,
-    packageID: explicit.package,
+  const stats = await bindCatalog({
     baseURL: endpoints.baseURL,
-    models,
+    entries: outcome.entries,
     ...(sourceConnection ? { sourceConnection } : {}),
   })
-  state.commit(
-    generation,
-    connectionUpdate({
+  state.commit(generation, {
+    ...connectionUpdate({
       address: plan.address,
       addressSource: plan.addressSource,
       keySource: plan.keySource,
@@ -364,16 +468,18 @@ async function setupConnection(ctx: Context) {
       keySaved: true,
       verified: "ok",
       verifyKind: outcome.kind,
-      catalogModels: models.length,
+      catalogModels: outcome.entries.length,
     }),
-  )
+    ...stats,
+  })
 
-  if (models.length === 0) {
+  if (outcome.entries.length === 0) {
     console.warn(`[${PLUGIN_ID}] ${endpoints.modelsURL} returned an empty directory; no models are selectable`)
   }
   console.log(
-    `[${PLUGIN_ID}] registered ${models.length} models from ${endpoints.modelsURL} ` +
-      `(connection ${plan.mode}, key ${redactKey(plan.key)}, address from ${plan.addressSource})`,
+    `[${PLUGIN_ID}] registered ${outcome.entries.length} models from ${endpoints.modelsURL} ` +
+      `(connection ${plan.mode}, key ${redactKey(plan.key)}, address from ${plan.addressSource}, ` +
+      `fast ${fastEnabled ? "on" : "off"}, prices ${stats.costModels})`,
   )
 
   return cleanup

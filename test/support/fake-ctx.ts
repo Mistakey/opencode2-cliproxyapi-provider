@@ -20,6 +20,7 @@ export interface FakeHost {
   connectCalls: { integrationID: string; key: string; answer?: Record<string, string> }[]
   rpcRegistrations: { definition: { id: string; methods: Record<string, unknown> }; handlers: Record<string, unknown> }[]
   rpcEvents: { name: string; data: unknown }[]
+  storageValues: Map<string, unknown>
   logs: string[]
   restoreConsole: () => void
 }
@@ -37,6 +38,7 @@ export function createFakeHost(options: {
   omit?: string[]
   credentials?: FakeCredential[]
   location?: string
+  storage?: Record<string, unknown>
 } = {}): FakeHost {
   const integrations: FakeHost["integrations"] = []
   const credentials: FakeCredential[] = options.credentials ?? []
@@ -44,6 +46,7 @@ export function createFakeHost(options: {
   const connectCalls: FakeHost["connectCalls"] = []
   const rpcRegistrations: FakeHost["rpcRegistrations"] = []
   const rpcEvents: FakeHost["rpcEvents"] = []
+  const storageValues = new Map<string, unknown>(Object.entries(options.storage ?? {}))
   const logs: string[] = []
 
   let nextCredential = credentials.length + 1
@@ -65,6 +68,20 @@ export function createFakeHost(options: {
         rpcRegistrations.push({ definition, handlers })
         return { dispose: async () => undefined, events }
       },
+    },
+    storage: {
+      get: async (key: string) => storageValues.get(key),
+      set: async (key: string, value: unknown) => {
+        storageValues.set(key, value)
+      },
+      remove: async (key: string) => {
+        storageValues.delete(key)
+      },
+      scan: async (input: { prefix: string }) => ({
+        entries: [...storageValues.entries()]
+          .filter(([key]) => key.startsWith(input.prefix))
+          .map(([key, value]) => ({ key, value })),
+      }),
     },
     integration: {
       transform: async (callback: (editor: unknown) => void) => {
@@ -163,6 +180,7 @@ export function createFakeHost(options: {
     connectCalls,
     rpcRegistrations,
     rpcEvents,
+    storageValues,
     logs,
     restoreConsole: () => {
       console.log = originals.log

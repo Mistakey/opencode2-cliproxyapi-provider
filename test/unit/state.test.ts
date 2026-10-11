@@ -12,6 +12,8 @@ describe("ConnectionState", () => {
     keyHint: "(none)",
     keySaved: false,
     verified: "unknown" as const,
+    fastEnabled: false,
+    fastEffectiveModels: 0,
   }
 
   test("commits an update for the current generation", () => {
@@ -48,6 +50,25 @@ describe("ConnectionState", () => {
     expect(state.read().verifyMessage).toBeUndefined()
     expect("verifyMessage" in state.read()).toBe(false)
     expect(JSON.stringify(state.read())).not.toContain("401")
+  })
+
+  test("patches non-connection state without touching the generation", () => {
+    const state = new ConnectionState({ ...initial, now: () => 1000 })
+    const generation = state.begin()
+    state.commit(generation, { verified: "ok", catalogModels: 2 })
+    state.patch({ fastEnabled: true, fastEffectiveModels: 2, costModels: 2 })
+    expect(state.read()).toMatchObject({
+      verified: "ok",
+      fastEnabled: true,
+      fastEffectiveModels: 2,
+      costModels: 2,
+      generation,
+    })
+    // A pending connection change does not drop a Fast update.
+    state.begin()
+    state.patch({ fastEnabled: false, fastEffectiveModels: 0 })
+    expect(state.read().fastEnabled).toBe(false)
+    expect(state.read().verified).toBe("ok")
   })
 
   test("describes a connection without ever holding the key", () => {

@@ -24,6 +24,7 @@ const setup: Setup = async (ctx) => {
 }
 
 let mock: Awaited<ReturnType<typeof startMockCpa>> | undefined
+let priceMock: Awaited<ReturnType<typeof startMockCpa>> | undefined
 let host: FakeHost | undefined
 
 afterEach(async () => {
@@ -31,6 +32,8 @@ afterEach(async () => {
   host = undefined
   await mock?.close()
   mock = undefined
+  await priceMock?.close()
+  priceMock = undefined
 })
 
 describe("plugin setup", () => {
@@ -44,7 +47,7 @@ describe("plugin setup", () => {
 
   test("registers the CPA key method, stores the explicit key once and binds the catalog to that connection", async () => {
     mock = await startMockCpa({ models })
-    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
 
     await setup(host.ctx)
     host.restoreConsole()
@@ -97,7 +100,7 @@ describe("plugin setup", () => {
 
   test("reuses the stored credential instead of writing another one", async () => {
     mock = await startMockCpa({ models })
-    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
 
     await setup(host.ctx)
     await setup(host.ctx)
@@ -111,7 +114,7 @@ describe("plugin setup", () => {
 
   test("never writes the key into logs or provider settings", async () => {
     mock = await startMockCpa({ models })
-    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
 
     await setup(host.ctx)
     host.restoreConsole()
@@ -140,7 +143,7 @@ describe("plugin setup", () => {
   })
 
   test("refuses to register models without a key", async () => {
-    host = createFakeHost({ options: {} })
+    host = createFakeHost({ options: { modelsDev: false } })
     await setup(host.ctx)
     host.restoreConsole()
     expect(host.providers).toHaveLength(0)
@@ -149,7 +152,7 @@ describe("plugin setup", () => {
 
   test("keeps a broken directory distinct from an empty one", async () => {
     mock = await startMockCpa({ directory: { status: 503, body: { error: "upstream down" } } })
-    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
     await setup(host.ctx)
     host.restoreConsole()
     expect(host.providers).toHaveLength(0)
@@ -159,7 +162,7 @@ describe("plugin setup", () => {
 
     await mock.close()
     mock = await startMockCpa({ models: [] })
-    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
     await setup(host.ctx)
     host.restoreConsole()
     expect(host.providers).toHaveLength(1)
@@ -169,7 +172,7 @@ describe("plugin setup", () => {
 
   test("refuses a directory body that is not a catalog", async () => {
     mock = await startMockCpa({ directory: { raw: "<html>proxy</html>", contentType: "text/html" } })
-    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
     await setup(host.ctx)
     host.restoreConsole()
     expect(host.providers).toHaveLength(0)
@@ -178,7 +181,7 @@ describe("plugin setup", () => {
 
   test("accepts a plain OpenAI listing when the enhanced directory is not served", async () => {
     mock = await startMockCpa({ directory: { body: { object: "list", data: [{ id: "plain-model" }] } } })
-    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
     await setup(host.ctx)
     host.restoreConsole()
     const provider = host.providers[0] as { models: { id: string; capabilities: unknown }[] }
@@ -187,10 +190,134 @@ describe("plugin setup", () => {
   })
 
   test("reports an unusable address without registering", async () => {
-    host = createFakeHost({ options: { baseURL: "ftp://cpa.test", apiKey: API_KEY } })
+    host = createFakeHost({ options: { baseURL: "ftp://cpa.test", apiKey: API_KEY, modelsDev: false } })
     await setup(host.ctx)
     host.restoreConsole()
     expect(host.providers).toHaveLength(0)
     expect(host.logs.join("\n")).toContain("must use http or https")
   })
+
+  test("leaves Fast off by default and only injects priority for a declared-capable model", async () => {
+    mock = await startMockCpa({
+      models: [
+        { slug: "capable-model", service_tiers: ["priority"], supported_reasoning_levels: [{ effort: "high" }] },
+        { slug: "plain-model" },
+        // Only `additional_speed_tiers`: the reference plugin does not treat it as capability.
+        { slug: "speed-only-model", additional_speed_tiers: ["priority"] },
+      ],
+    })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as {
+      models: { id: string; settings?: Record<string, unknown>; variants: { id: string; settings: unknown }[] }[]
+    }
+    expect(provider.models.map((model) => model.settings)).toEqual([undefined, undefined, undefined])
+    // Fast never changes the reasoning variants, even when it applies.
+    expect(provider.models[0]?.variants).toEqual([{ id: "high", settings: { reasoningEffort: "high" } }])
+
+    const snapshot = await status(host)
+    expect(snapshot.fastEnabled).toBe(false)
+    expect(snapshot.fastEffectiveModels).toBe(0)
+  })
+
+  test("applies a stored Fast preference to capable models only", async () => {
+    mock = await startMockCpa({
+      models: [
+        { slug: "capable-model", service_tiers: [{ id: "priority" }] },
+        { slug: "plain-model" },
+        { slug: "speed-only-model", additional_speed_tiers: ["priority"] },
+      ],
+    })
+    host = createFakeHost({
+      options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false },
+      storage: { "cliproxyapi.fast.cliproxyapi": true },
+    })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { models: { id: string; settings?: Record<string, unknown> }[] }
+    expect(provider.models.map((model) => model.settings)).toEqual([
+      { serviceTier: "priority" },
+      undefined,
+      undefined,
+    ])
+    const snapshot = await status(host)
+    expect(snapshot.fastEnabled).toBe(true)
+    expect(snapshot.fastEffectiveModels).toBe(1)
+  })
+
+  test("setFast persists the preference, reports it and refuses a non-boolean", async () => {
+    mock = await startMockCpa({ models: [{ slug: "capable-model", service_tiers: ["priority"] }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const handlers = host.rpcRegistrations[0]?.handlers as {
+      setFast: (input: unknown) => Promise<{ ok: boolean; message?: string; snapshot: { fastEnabled: boolean; fastEffectiveModels: number } }>
+    }
+    const enabled = await handlers.setFast({ enabled: true })
+    expect(enabled.ok).toBe(true)
+    expect(enabled.snapshot.fastEnabled).toBe(true)
+    expect(host.storageValues.get("cliproxyapi.fast.cliproxyapi")).toBe(true)
+    expect(host.rpcEvents.at(-1)).toEqual({ name: "changed", data: expect.objectContaining({ fastEnabled: true }) })
+
+    // The registry is rebuilt at the next location boot, so the effective count
+    // still describes what is registered right now.
+    expect(enabled.snapshot.fastEffectiveModels).toBe(0)
+
+    const disabled = await handlers.setFast({ enabled: false })
+    expect(disabled.snapshot.fastEnabled).toBe(false)
+    expect(host.storageValues.get("cliproxyapi.fast.cliproxyapi")).toBe(false)
+
+    const invalid = await handlers.setFast({ enabled: "yes" })
+    expect(invalid.ok).toBe(false)
+    expect(invalid.message).toContain("boolean")
+  })
+
+  test("attaches a models.dev price estimate without inventing one", async () => {
+    mock = await startMockCpa({ models: [{ slug: "gpt-5.2" }, { slug: "unpriced-model" }] })
+    priceMock = await startMockCpa({
+      directory: {
+        status: 200,
+        body: {
+          openai: { models: { "gpt-5.2": { cost: { input: 1.25, output: 10, cache_read: 0.125 } } } },
+        },
+      },
+    })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDevURL: `${priceMock.url}/v1/models` } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { models: { id: string; cost: unknown[] }[] }
+    expect(provider.models.map((model) => model.cost)).toEqual([
+      [{ input: 1.25, output: 10, cache: { read: 0.125, write: 0 } }],
+      [],
+    ])
+    const snapshot = await status(host)
+    expect(snapshot.costModels).toBe(1)
+    // The estimate is labelled, never presented as a CPA bill.
+    expect(host.logs.join("\n")).toContain("prices 1")
+  })
+
+  test("registers models without a price when models.dev cannot be read", async () => {
+    mock = await startMockCpa({ models: [{ slug: "gpt-5.2" }] })
+    host = createFakeHost({
+      options: { baseURL: mock.url, apiKey: API_KEY, modelsDevURL: "http://127.0.0.1:1/api.json", modelsDevTimeoutMs: 500 },
+    })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as { models: { cost: unknown[] }[] }
+    expect(provider.models).toHaveLength(1)
+    expect(provider.models[0]?.cost).toEqual([])
+    expect(host.logs.join("\n")).toContain("models.dev price estimate unavailable")
+  })
 })
+
+/** Read the connection snapshot through the registered RPC, as a client would. */
+async function status(host: FakeHost) {
+  const handlers = host.rpcRegistrations[0]?.handlers as { status: () => Promise<Record<string, unknown>> }
+  return handlers.status()
+}
