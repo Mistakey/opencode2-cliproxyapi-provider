@@ -73,6 +73,26 @@ function createFakeTui() {
           server.fastEffectiveModels = input.enabled ? 2 : 0
           return { ok: true, snapshot: { ...server } }
         },
+        refresh: async (input: unknown) => {
+          rpcCalls.push({ method: "refresh", input })
+          return { ok: true, kind: "ok", models: 2, snapshot: { ...server } }
+        },
+        pauseState: async (input: unknown) => {
+          rpcCalls.push({ method: "pauseState", input })
+          return { paused: false, changedAt: 1, waiting: 0, scope: "location" }
+        },
+        pause: async (input: unknown) => {
+          rpcCalls.push({ method: "pause", input })
+          return { paused: true, changedAt: 2, waiting: 0, scope: "location" }
+        },
+        resume: async (input: unknown) => {
+          rpcCalls.push({ method: "resume", input })
+          return { paused: false, changedAt: 3, waiting: 0, scope: "location" }
+        },
+        stats: async (input: unknown) => {
+          rpcCalls.push({ method: "stats", input })
+          return { stats: undefined }
+        },
         events: { on: () => () => undefined },
       }),
       location: {
@@ -141,12 +161,18 @@ describe("TUI entry", () => {
         "cpa-refresh",
         "cpa-connect",
         "cpa-fast",
+        "cpa-pause",
+        "cpa-resume",
+        "cpa-stats",
       ])
       expect(fake.commands.map((command) => command.id)).toEqual([
         "cliproxyapi.status",
         "cliproxyapi.refresh",
         "cliproxyapi.connect",
         "cliproxyapi.fast",
+        "cliproxyapi.pause",
+        "cliproxyapi.resume",
+        "cliproxyapi.stats",
       ])
       expect(fake.collisions).toEqual([])
       for (const name of HOST_COMMANDS) expect(fake.names.get(name)).toBe("host")

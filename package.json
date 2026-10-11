@@ -36,7 +36,10 @@
     "smoke:host": "bun scripts/host-smoke.mjs",
     "smoke:connection": "bun scripts/host-connection.mjs",
     "smoke:catalog": "bun scripts/host-catalog.mjs",
-    "smoke:transport": "bun scripts/host-transport.mjs"
+    "smoke:transport": "bun scripts/host-transport.mjs",
+    "smoke:pause": "bun scripts/host-pause.mjs",
+    "smoke:pause-ws": "bun scripts/host-pause-ws.mjs",
+    "smoke:stats": "bun scripts/host-stats.mjs"
   },
   "opencode": {
     "supported": ">=2.0.26 <3",

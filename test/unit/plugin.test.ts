@@ -497,7 +497,13 @@ describe("plugin setup", () => {
     host.restoreConsole()
 
     const names = host.sessionHooks.map((hook) => hook.name).sort()
-    expect(names).toEqual(["compaction", "experimental.ws.handshake", "experimental.ws.send", "model.request"])
+    expect(names).toEqual([
+      "compaction",
+      "experimental.ws.handshake",
+      "experimental.ws.send",
+      "model.request",
+      "model.request",
+    ])
     expect(names.some((name) => name.startsWith("http."))).toBe(false)
     expect(
       host.sessionHooks.every(

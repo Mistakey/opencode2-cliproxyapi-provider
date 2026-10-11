@@ -38,7 +38,9 @@ import { fastStorageKey, readFastPreference, writeFastPreference } from "./fast"
 import { PLUGIN_ID, describeIssues, inspectHost } from "./host"
 import { DEFAULT_MODELS_DEV_URL, fetchModelsDevCatalog } from "./models-dev"
 import { ContinuationReset, SOCKET_HEADER } from "./continuation"
+import { PauseGate } from "./pause"
 import { CpaRpc } from "./rpc"
+import { SessionStatsTracker, type SessionEventLike } from "./stats"
 import { ConnectionState, connectionUpdate, verifyConnection, type ConnectionUpdate } from "./state"
 import { directoryPrefersWebSocket, planCompaction, planTransport, type CompactionPolicy, type TransportPolicy } from "./transport"
 
@@ -51,7 +53,10 @@ type ActiveConnection = Awaited<ReturnType<Context["integration"]["connection"][
 /** The registered CPA RPC, narrowed to what this plugin emits. */
 interface CpaRegistration {
   readonly events: {
-    readonly emit: (name: "changed" | "stale", data: Readonly<Record<string, unknown>>) => Promise<void>
+    readonly emit: (
+      name: "changed" | "stale" | "pause.changed" | "stats.changed",
+      data: Readonly<Record<string, unknown>>,
+    ) => Promise<void>
   }
   readonly dispose: () => Promise<void>
 }
@@ -194,6 +199,15 @@ async function setupConnection(ctx: Context) {
       package: policy.package,
       ...(explicit.compactionInvalid !== undefined ? { invalidPreference: explicit.compactionInvalid } : {}),
     })
+
+  // Session stats are aggregated per session id; the pause gate is per location.
+  // A paused model call waits on a promise, so cancelling the session or
+  // unloading the plugin ends the wait without leaving a timer behind.
+  const stats = new SessionStatsTracker()
+  const pause = new PauseGate({
+    onWaitStart: (sessionID) => stats.notePauseStart(sessionID),
+    onWaitEnd: (sessionID) => stats.notePauseEnd(sessionID),
+  })
 
   await registerIntegration(ctx, explicit, integrationID)
 
@@ -514,6 +528,29 @@ async function setupConnection(ctx: Context) {
       }
       return { ok: true, snapshot: state.read() }
     },
+
+    // Pause and resume are server-side: the gate holds the next model call, and
+    // the resume never waits on a model call itself.
+    pause: async () => {
+      const next = pause.pause()
+      await registration?.events.emit("pause.changed", next)
+      return next
+    },
+    resume: async () => {
+      const next = pause.resume()
+      await registration?.events.emit("pause.changed", next)
+      return next
+    },
+    pauseState: async () => pause.read(),
+
+    // Stats read from the server's own aggregate; an unknown session is an
+    // absent field, never a fabricated zero-filled one.
+    stats: async (input) => {
+      const sessionID = readString(input, "sessionID")
+      const value = sessionID ? stats.read(sessionID) : undefined
+      return value ? { stats: value } : {}
+    },
+    sessions: async () => ({ sessions: stats.list() }),
   })
 
   // Warn once when a request actually selects a model retained as stale, so the
@@ -529,8 +566,52 @@ async function setupConnection(ctx: Context) {
     { providerID },
   )
 
+  // Gate this provider's model calls. The host filters by providerID, so no
+  // other provider's requests reach this hook. The host interrupts the call's
+  // fiber on cancel, which is what ends the wait.
+  const hook = await ctx.session.hook(
+    "model.request",
+    async (input) => {
+      await pause.wait(String(input.sessionID))
+    },
+    { providerID: String(providerID) },
+  )
+
+  // Session events feed the stats and release the waits of a cancelled session.
+  // `location.shutdown` is the host's unload signal for this generation: the
+  // host does not settle an in-flight hook by itself, so end the held waits and
+  // stop the stream here instead of leaving them to a cleanup the host does not
+  // call on a live reload.
+  const subscription = new AbortController()
+  void (async () => {
+    try {
+      for await (const event of ctx.event.subscribe({ signal: subscription.signal })) {
+        const type = (event as { type?: string }).type
+        if (type === "location.shutdown") {
+          pause.close()
+          subscription.abort()
+          break
+        }
+        const observed = stats.observe(event as SessionEventLike)
+        if (!observed) continue
+        if (type === "session.execution.interrupted") {
+          pause.cancel(observed.sessionID)
+        }
+        if (observed.boundary) {
+          const snapshot = stats.read(observed.sessionID)
+          if (snapshot) await registration?.events.emit("stats.changed", snapshot)
+        }
+      }
+    } catch {
+      // The event stream ends with the location; there is nothing to report.
+    }
+  })()
+
   const cleanup = async () => {
+    subscription.abort()
+    pause.releaseAll()
     service.dispose()
+    await hook.dispose()
     await staleHook?.dispose()
     await registration?.dispose()
     await compactionHook.dispose()

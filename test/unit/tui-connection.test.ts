@@ -111,12 +111,25 @@ describe("matchesLocation", () => {
 function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
   rpc: ConnectionRpc
   statusCalls: () => number
-  emit: (event: { location?: { directory?: string } }) => void
+  emit: (event: { data?: unknown; location?: { directory?: string } }) => void
   emitStale: (event: { location?: { directory?: string }; data?: unknown }) => void
 } {
   let calls = 0
-  let handler: ((event: { location?: { directory?: string } }) => void) | undefined
-  let staleHandler: ((event: { location?: { directory?: string }; data?: unknown }) => void) | undefined
+  const handlers = new Map<string, Set<(event: { data?: unknown; location?: { directory?: string } }) => void>>()
+  const on = (name: string, next: (event: { data?: unknown; location?: { directory?: string } }) => void) => {
+    let set = handlers.get(name)
+    if (!set) {
+      set = new Set()
+      handlers.set(name, set)
+    }
+    set.add(next)
+    return () => {
+      set!.delete(next)
+    }
+  }
+  const dispatch = (name: string, event: { data?: unknown; location?: { directory?: string } }) => {
+    for (const handler of handlers.get(name) ?? []) handler(event)
+  }
   const rpc: ConnectionRpc = {
     status: async () => {
       calls += 1
@@ -129,23 +142,18 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
       ok: true,
       snapshot: snapshot({ fastEnabled: enabled, fastEffectiveModels: enabled ? 2 : 0 }),
     }),
-    events: {
-      on: (name: "changed" | "stale", next: (event: { location?: { directory?: string }; data?: unknown }) => void) => {
-        if (name === "changed") handler = next
-        else staleHandler = next
-        return () => {
-          if (name === "changed") handler = undefined
-          else staleHandler = undefined
-        }
-      },
-    },
+    pause: async () => ({ paused: true, changedAt: 1, waiting: 0, scope: "location" }),
+    resume: async () => ({ paused: false, changedAt: 2, waiting: 0, scope: "location" }),
+    pauseState: async () => ({ paused: false, changedAt: 1, waiting: 0, scope: "location" }),
+    stats: async () => ({ stats: undefined }),
+    events: { on },
     ...overrides,
   }
   return {
     rpc,
     statusCalls: () => calls,
-    emit: (event) => handler?.(event),
-    emitStale: (event) => staleHandler?.(event),
+    emit: (event) => dispatch("changed", event),
+    emitStale: (event) => dispatch("stale", event),
   }
 }
 

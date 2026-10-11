@@ -23,10 +23,11 @@ Delivered here:
 - connection switching that rebinds the directory to the new connection, with a
   generation guard so a slow request from a replaced connection cannot overwrite
   the newer state
-- a server RPC (`status`, `verify`, `connect`, `refresh`, `setFast` + `changed`
-  and `stale` events) and a TUI entry that reads the snapshot, subscribes,
-  refreshes the directory and runs the wizard and the Fast toggle without ever
-  talking to CPA itself
+- a server RPC (`status`, `verify`, `connect`, `refresh`, `setFast`, `pause`,
+  `resume`, `pauseState`, `stats`, `sessions`, plus `changed`, `stale`,
+  `pause.changed` and `stats.changed` events) and a TUI entry that reads the
+  snapshot, subscribes, refreshes the directory and runs the wizard, the Fast
+  toggle and the pause/stats commands without ever talking to CPA itself
 - a per-connection directory cache in OpenCode's own plugin storage: a restart
   that finds a matching cache registers its models immediately and then
   refreshes in the background, a failed refresh keeps the last good directory,
@@ -43,6 +44,7 @@ Delivered here:
   tiers
 - standard, Fast and context-tiered **price estimates** matched from the public
   models.dev catalog, with the reference alias table and no invented multiplier
+- a cancellable pause gate and per-session duration/TPS/token/cache stats
 - credential handling through OpenCode's native key method and credential store
 - transport selection driven by the directory's `prefer_websockets` flag, with a
   forced HTTP/WebSocket option and a clear diagnostic when the chosen runtime
@@ -56,7 +58,7 @@ Delivered here:
   upgrades, parallel sessions, credential rotation and socket release on unload
 - project scaffolding, tests, isolated host scripts and this document
 
-Not part of this slice (later tasks): pause and stats, real CPA validation.
+Not part of this slice (later tasks): real CPA validation.
 
 ## Requirements
 
@@ -213,21 +215,26 @@ With the plugin loaded, the TUI entry registers:
 
 | Command | What it does |
 | --- | --- |
-| `/cpa-status` | Reads the snapshot over RPC and shows address, saved key hint, verification state, model count, last refresh, stale models, the Fast preference, the price source and the last error |
+| `/cpa-status` | Reads the snapshot over RPC and shows address, saved key hint, verification state, model count, last refresh, stale models, the Fast preference, the price source, the pause state and the last error |
 | `/cpa-refresh` | Asks the server to read the CPA directory again, bypassing the cache |
 | `/cpa-connect` | Prompts for the address, reads the key with a **masked** input, verifies, then saves |
 | `/cpa-fast` | Toggles the Fast preference, then reloads the location so it reaches the provider registry |
+| `/cpa-pause` | Stops the next CPA request; one already in flight completes |
+| `/cpa-resume` | Releases the waiting CPA requests |
+| `/cpa-stats` | Shows this session's effective duration, TPS and token/cache usage |
 
-The prompt footer also carries a short connection state (`CPA 3 models · Fast off`,
+The prompt footer also carries a short state: the connection (`CPA 3 models · Fast off`,
 `CPA 3 models · 1 stale · Fast off`, `CPA 3 models (cached) · Fast off`,
-`CPA saved · Fast off`, `CPA auth · Fast off`, `CPA offline`). A request that
-selects a model retained as stale shows a warning toast, so the model stays usable
-but the user is not promised it still exists upstream. The TUI talks to the server
-over RPC only; it never contacts CPA and never reads server files, so it also
-works against a remote server. Events are live-only, so the view re-reads the
-snapshot on a reconnect instead of replaying missed events. Every command name is
-CPA-prefixed (`cpa-status`, `cpa-refresh`, `cpa-connect`, `cpa-fast`) and is added
-as a keymap layer, so no existing command is replaced.
+`CPA saved · Fast off`, `CPA auth · Fast off`, `CPA offline`), `paused` while
+paused, and the last turn's effective duration with its TPS (`2.1s · 9.9 tok/s`).
+A request that selects a model retained as stale shows a warning toast, so the
+model stays usable but the user is not promised it still exists upstream. The TUI
+talks to the server over RPC only; it never contacts CPA and never reads server
+files, so it also works against a remote server. Events are live-only, so the view
+re-reads the snapshot on a reconnect instead of replaying missed events. Every
+command name is CPA-prefixed (`cpa-status`, `cpa-refresh`, `cpa-connect`,
+`cpa-fast`, `cpa-pause`, `cpa-resume`, `cpa-stats`) and is added as a keymap
+layer, so no existing command is replaced.
 
 ## Connection RPC
 
@@ -241,18 +248,72 @@ connection:
 | `connect` | `{ address, key }` | verifies, saves through the native key method, rebinds models |
 | `refresh` | `{}` | re-reads the active connection's directory, bypassing the cache |
 | `setFast` | `{ enabled }` | persists the Fast preference and returns the new snapshot |
+| `pause` | `{}` | pause state; stops the next CPA request |
+| `resume` | `{}` | pause state; releases the waiting requests |
+| `pauseState` | `{}` | pause state without changing it |
+| `stats` | `{ sessionID }` | that session's duration/TPS/token stats, or nothing when unknown |
+| `sessions` | `{}` | every observed session, most recent first |
 
-A `changed` event carries the new snapshot after every committed change, and a
+A `changed` event carries the new snapshot after every committed change, a
 `stale` event carries `{ modelID }` when a request selects a model retained as
-stale. Each event and call carries a `location`; external clients receive events
-from every location and must filter. The snapshot never contains the key, only
-`(redacted, N chars)`; it also reports `catalogModels`, `catalogFetchedAt`,
-`catalogStaleModels`/`catalogStaleIds` and `catalogFromCache`, keeps the Fast
-preference (`fastEnabled`) apart from what is registered right now
-(`fastEffectiveModels`), reports how many models carry a price estimate
-(`costModels`), and reports the transport decision (`transport`,
+stale, a `pause.changed` event carries the new pause state, and a
+`stats.changed` event carries a session's stats when a turn boundary moves (not
+on every step). Each event and call carries a `location`; external clients
+receive events from every location and must filter. The snapshot never contains
+the key, only `(redacted, N chars)`; it also reports `catalogModels`,
+`catalogFetchedAt`, `catalogStaleModels`/`catalogStaleIds` and
+`catalogFromCache`, keeps the Fast preference (`fastEnabled`) apart from what is
+registered right now (`fastEffectiveModels`), reports how many models carry a
+price estimate (`costModels`), and reports the transport decision (`transport`,
 `transportSource`, `directoryPrefersWebSocket`, `transportNote`) and the
-compaction mechanism (`compaction`, `compactionNote`).
+compaction mechanism (`compaction`, `compactionNote`). Neither the pause state
+nor the stats carry a credential.
+
+## Pause and session stats
+
+Pausing stops the *next* CPA request; a request already in flight finishes
+normally. The gate is one promise per waiting model call and holds no timer, so
+a resume is an RPC call that never depends on a model call. Interrupting a
+session drops that session's wait — the host interrupts the request itself, so
+the held request is never sent. The pause is **not persisted**: a restart or
+reload starts running, because a stored "paused" would silently block the next
+session. It is scoped to one location, and the gate is registered for this
+provider only, so another location or another provider is unaffected.
+
+Unload has its own rule. A live `location.reload()` replaces the plugin
+generation, and the host emits `location.shutdown` to the old generation. The
+host does call the cleanup returned by `setup` — but only while no
+`model.request` hook invocation is still pending. A held pause wait is exactly
+such a pending hook: the host's scope close then waits on that fiber and the
+cleanup never runs, so the wait would be orphaned and the replaced generation's
+event subscription would keep receiving events. The plugin therefore cancels its
+held waits and stops its event subscription on `location.shutdown` instead of
+relying on the cleanup: a reload while a request is paused **cancels** that
+request — it is not sent, and the session ends with an error instead of hanging
+— and the reloaded location starts running, like a restart. Cancelling is the
+point: a reload (including the automatic reload the Fast setting performs) must
+not turn a pause into a silently sent request. The returned cleanup stays as the
+fallback for the case where the host does call it.
+
+`/cpa-stats` shows the breakdown and the footer shows the last turn. The same
+data is available over RPC (`stats`, `sessions`).
+
+Measurement rules, asserted by the tests:
+
+| Term | Definition |
+| --- | --- |
+| turn | one host execution: `session.execution.started` until `succeeded`, `failed` or `interrupted`. One prompt with tool continuations is one turn, not several. |
+| effective duration | the turn's wall time minus the time this session spent waiting at the pause gate. Pausing while nothing waits subtracts nothing. |
+| TPS | output tokens / effective seconds for the whole turn. It is **not** pure decode speed: tool rounds and retries are inside the same window. |
+| tokens | summed from `session.step.ended` / `session.step.failed`, keyed by assistant message id |
+| total | `input + output + reasoning + cache.read + cache.write`, the host's own `TokenUsage.total` |
+| retries | counted from `session.retry.scheduled`; a retried step reuses its message id, so its usage is counted once, not once per attempt |
+| sessions | every session id is aggregated on its own; a child (subagent) session is never folded into its parent |
+
+A step that reports no usage contributes no tokens: a missing value is never
+invented. Stats live in the server process: they survive a TUI disconnect (the
+TUI re-reads the snapshot on reconnect) but not a server restart. Title and
+compaction requests are outside the agent-loop turn and are not counted.
 
 ## Model mapping
 
@@ -400,11 +461,44 @@ parallel sessions, a rotated credential and socket release on unload.
 bun run smoke:transport
 ```
 
+`scripts/host-pause.mjs` covers the pause gate in a real host: a paused request
+is held before it is sent, an RPC resume releases it, another provider is not
+gated, interrupting a paused session ends the wait without sending the request,
+a live `location.reload()` cancels the held wait without sending it and the
+reloaded location's gate still works, and stopping the host while a call is
+paused ends the wait too.
+
+```bash
+bun run smoke:pause
+```
+
+`scripts/host-pause-ws.mjs` covers where the slices meet, against a mock CPA that
+serves a real Responses WebSocket: pause holds the next request before any frame
+and resume sends it, interrupting a paused WebSocket session ends the wait, the
+gate and the stats still work after a summary, a remote client re-reads the pause
+snapshot after a disconnect, the Fast toggle's location reload cancels a held
+request instead of sending it, and a reload starts a new generation with empty
+in-memory stats.
+
+```bash
+bun run smoke:pause-ws
+```
+
+`scripts/host-stats.mjs` covers the measurement: one prompt with a tool
+continuation is one turn with two steps, the tokens are the usage the provider
+reported, the turn carries effective duration and TPS, and pause time inside the
+turn is excluded from the effective duration.
+
+```bash
+bun run smoke:stats
+```
+
 All of them talk to loopback mocks only — a mock CPA, plus a models.dev price
 fixture for the smoke run: no real credential, no real CPA request, no cost.
 `SMOKE_DEBUG=1` also dumps the request sequence of the smoke run, and
 `OC2CPA_ONLY=ws|http|diagnostic|recovery|native|parallel|rotation` runs one
-transport scenario.
+transport scenario. `OPENCODE_CLI` selects the host binary for every smoke run,
+and `OC2CPA_SANDBOX` overrides its sandbox directory.
 
 ## Development
 
@@ -414,7 +508,7 @@ tests and the host scripts against that `node_modules`.
 ```bash
 npm ci                 # install the locked development dependencies
 bun test               # unit + native-runtime integration tests
-bun test test/unit     # directory parsing, mapping, cache/stale, prices, Fast, connection, state, RPC, TUI
+bun test test/unit     # directory parsing, mapping, cache/stale, prices, Fast, transport, connection, state, RPC, pause, stats, TUI
 bun test test/integration   # real Responses serialization, SSE parsing and the WebSocket channel
 bun run typecheck      # tsc --noEmit
 ```
@@ -457,6 +551,11 @@ remote client and as a catalog reader.
   location-scoped plugin models; the API's `model.list` with an explicit
   location does, and model availability is also exercised through a real
   session. That is also how the price estimate is observed.
+- The pause is runtime state, not a persisted preference, and the stats are
+  in-memory: a server restart clears them, and a location reload (including the
+  one the Fast toggle performs) starts a new plugin generation with no stats.
+  A request held by the pause at that moment is cancelled, not sent.
+- TPS is the whole-turn figure described above, not a decode-speed measurement.
 - The interactive wizard masks the key and verifies before saving, but the host
   offers no password input for plugins, so the masked field is drawn by the
   plugin while the host's dialog API provides the frame.

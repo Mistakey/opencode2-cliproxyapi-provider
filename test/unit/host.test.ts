@@ -24,6 +24,7 @@ function completeContext(): Record<string, unknown> {
     rpc: { register: fn },
     session: { hook: fn },
     storage: { get: fn, set: fn, remove: fn },
+    event: { subscribe: fn },
   }
 }
 
