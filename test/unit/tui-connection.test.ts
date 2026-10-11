@@ -7,6 +7,7 @@ import {
   matchesLocation,
   parseReport,
   parseSnapshot,
+  parseStaleModelID,
   type ConnectionRpc,
 } from "../../src/tui-connection"
 
@@ -43,7 +44,26 @@ describe("describeConnection", () => {
     expect(describeConnection(snapshot({ verified: "unknown", keySaved: false }), true)).toBe("CPA not configured")
     expect(describeConnection(snapshot({ catalogModels: 0 }), true)).toBe("CPA empty")
     expect(describeConnection(snapshot({ catalogModels: 5 }), true)).toBe("CPA 5 models")
-    expect(describeConnection(snapshot({ verified: "failed", verifyKind: "auth" }), true)).toBe("CPA auth")
+    expect(describeConnection(snapshot({ verified: "failed", verifyKind: "auth" }), true)).toBe("CPA 2 models · auth")
+    expect(describeConnection(snapshot({ verified: "failed", verifyKind: "auth", catalogModels: 0 }), true)).toBe("CPA auth")
+  })
+
+  test("shows cached, stale and last-refresh state", () => {
+    expect(describeConnection(snapshot({ catalogFromCache: true }), true)).toBe("CPA 2 models (cached)")
+    expect(describeConnection(snapshot({ catalogStaleModels: 1 }), true)).toBe("CPA 2 models · 1 stale")
+    const detail = describeDetail(
+      snapshot({
+        catalogFromCache: true,
+        catalogFetchedAt: 1_700_000_000_000,
+        catalogStaleModels: 1,
+        catalogStaleIds: ["gone-model"],
+      }),
+      true,
+      undefined,
+    )
+    expect(detail).toContain("last refresh: 2023-11-14T22:13:20.000Z (from cache)")
+    expect(detail).toContain("stale: 1 (gone-model)")
+    expect(detail).not.toContain("sk-")
   })
 
   test("the detail view never contains key material", () => {
@@ -68,9 +88,11 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
   rpc: ConnectionRpc
   statusCalls: () => number
   emit: (event: { location?: { directory?: string } }) => void
+  emitStale: (event: { location?: { directory?: string }; data?: unknown }) => void
 } {
   let calls = 0
   let handler: ((event: { location?: { directory?: string } }) => void) | undefined
+  let staleHandler: ((event: { location?: { directory?: string }; data?: unknown }) => void) | undefined
   const rpc: ConnectionRpc = {
     status: async () => {
       calls += 1
@@ -78,11 +100,14 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
     },
     verify: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot() }),
     connect: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot({ address: "http://new.test" }) }),
+    refresh: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot({ catalogFetchedAt: 1 }) }),
     events: {
-      on: (_name, next) => {
-        handler = next
+      on: (name: "changed" | "stale", next: (event: { location?: { directory?: string }; data?: unknown }) => void) => {
+        if (name === "changed") handler = next
+        else staleHandler = next
         return () => {
-          handler = undefined
+          if (name === "changed") handler = undefined
+          else staleHandler = undefined
         }
       },
     },
@@ -92,6 +117,7 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
     rpc,
     statusCalls: () => calls,
     emit: (event) => handler?.(event),
+    emitStale: (event) => staleHandler?.(event),
   }
 }
 
@@ -171,5 +197,38 @@ describe("createConnectionView", () => {
     expect(report.kind).toBe("unreachable")
     expect(parseReport({ ok: true, kind: "ok" })).toEqual({ ok: true, kind: "ok" })
     expect(parseReport(42)).toBeUndefined()
+  })
+
+  test("refreshes the catalog over RPC and applies the returned snapshot", async () => {
+    const fake = fakeRpc()
+    const view = createConnectionView({ rpc: fake.rpc, directory: "/work/one" })
+    const report = await view.refreshCatalog()
+    expect(report.ok).toBe(true)
+    expect(report.models).toBe(2)
+    expect(view.snapshot()?.catalogFetchedAt).toBe(1)
+  })
+
+  test("forwards a stale event for this location only, once shaped as expected", async () => {
+    const fake = fakeRpc()
+    const seen: string[] = []
+    const view = createConnectionView({
+      rpc: fake.rpc,
+      directory: "/work/one",
+      onStale: (modelID) => seen.push(modelID),
+    })
+    const unsubscribe = view.subscribe()
+
+    fake.emitStale({ location: { directory: "/work/two" }, data: { modelID: "other-location" } })
+    fake.emitStale({ location: { directory: "/work/one" }, data: { modelID: "gone-model" } })
+    fake.emitStale({ location: { directory: "/work/one" }, data: { nonsense: true } })
+    expect(seen).toEqual(["gone-model"])
+
+    unsubscribe()
+    fake.emitStale({ location: { directory: "/work/one" }, data: { modelID: "after-unsubscribe" } })
+    expect(seen).toEqual(["gone-model"])
+
+    expect(parseStaleModelID({ data: { modelID: "m" } })).toBe("m")
+    expect(parseStaleModelID({ data: { modelID: "" } })).toBeUndefined()
+    expect(parseStaleModelID({ data: 42 })).toBeUndefined()
   })
 })

@@ -36,6 +36,8 @@ export interface ExplicitConfig {
   readonly integrationID: Integration.ID
   readonly package: string
   readonly catalogTimeoutMs?: number
+  /** Retention window for models missing from the directory; advanced/testing knob. */
+  readonly catalogStaleTtlMs?: number
 }
 
 function optionString(options: Record<string, unknown>, key: string): string | undefined {
@@ -72,6 +74,7 @@ export function readExplicitConfig(
     integrationID: Integration.ID.make(optionString(opts, "integrationID") ?? DEFAULT_INTEGRATION_ID),
     package: optionString(opts, "package") ?? RESPONSES_PACKAGE,
     catalogTimeoutMs: optionPositiveNumber(opts, "catalogTimeoutMs"),
+    catalogStaleTtlMs: optionPositiveNumber(opts, "catalogStaleTtlMs"),
   }
 }
 

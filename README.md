@@ -22,15 +22,23 @@ Delivered here:
 - connection switching that rebinds the directory to the new connection, with a
   generation guard so a slow request from a replaced connection cannot overwrite
   the newer state
-- a server RPC (`status`, `verify`, `connect` + a `changed` event) and a TUI
-  entry that reads the snapshot, subscribes and runs the wizard without ever
-  talking to CPA itself
+- a server RPC (`status`, `verify`, `connect`, `refresh` + `changed` and `stale`
+  events) and a TUI entry that reads the snapshot, subscribes, refreshes the
+  directory and runs the wizard without ever talking to CPA itself
+- a per-connection directory cache in OpenCode's own plugin storage: a restart
+  that finds a matching cache registers its models immediately and then
+  refreshes in the background, a failed refresh keeps the last good directory,
+  and a legal empty directory stays distinct from a failure
+- stale retention: a model that disappears from the directory is kept, marked
+  and dropped only after the retention window (seven days by default, measured
+  from the first miss); requesting a retained model warns instead of promising
+  the upstream still serves it
 - credential handling through OpenCode's native key method and credential store
 - project scaffolding, tests, isolated host scripts and this document
 
-Not part of this slice (later tasks): persisted catalog and refresh, Fast/service
-tiers, pause and stats, WebSocket transport and its failure matrix, native
-(provider-side) compaction, real CPA validation.
+Not part of this slice (later tasks): Fast/service tiers, pause and stats,
+WebSocket transport and its failure matrix, native (provider-side) compaction,
+real CPA validation.
 
 ## Requirements
 
@@ -92,7 +100,9 @@ own snapshot and RPC registration, and a change in one location does not
 touch another.
 
 Other options: `providerID` (default `cliproxyapi`), `providerName`,
-`integrationID`, `package` (runtime package override) and `catalogTimeoutMs`.
+`integrationID`, `package` (runtime package override), `catalogTimeoutMs` and
+`catalogStaleTtlMs` (how long a model missing from the directory is retained;
+default seven days, mainly useful for testing).
 
 The address may include a reverse-proxy subpath; it is preserved:
 
@@ -115,14 +125,18 @@ With the plugin loaded, the TUI entry registers:
 
 | Command | What it does |
 | --- | --- |
-| `/cpa-status` | Reads the snapshot over RPC and shows address, saved key hint, verification state and model count |
+| `/cpa-status` | Reads the snapshot over RPC and shows address, saved key hint, verification state, model count, last refresh, stale models and the last error |
+| `/cpa-refresh` | Asks the server to read the CPA directory again, bypassing the cache |
 | `/cpa-connect` | Prompts for the address, reads the key with a **masked** input, verifies, then saves |
 
 The prompt footer also carries a short connection state (`CPA 3 models`,
-`CPA saved`, `CPA auth`, `CPA offline`). The TUI talks to the server over RPC
-only; it never contacts CPA and never reads server files, so it also works
-against a remote server. Events are live-only, so the view re-reads the
-snapshot on a reconnect instead of replaying missed events.
+`CPA 3 models · 1 stale`, `CPA 3 models (cached)`, `CPA saved`, `CPA auth`,
+`CPA offline`). A request that selects a model retained as stale shows a warning
+toast, so the model stays usable but the user is not promised it still exists
+upstream. The TUI talks to the server over RPC only; it never contacts CPA and
+never reads server files, so it also works against a remote server. Events are
+live-only, so the view re-reads the snapshot on a reconnect instead of replaying
+missed events.
 
 ## Connection RPC
 
@@ -134,11 +148,14 @@ connection:
 | `status` | `{}` | the connection snapshot |
 | `verify` | `{ address, key? }` | probe result; nothing is saved |
 | `connect` | `{ address, key }` | verifies, saves through the native key method, rebinds models |
+| `refresh` | `{}` | re-reads the active connection's directory, bypassing the cache |
 
-A `changed` event carries the new snapshot after every committed change. Each
-event and call carries a `location`; external clients receive events from every
-location and must filter. The snapshot never contains the key, only
-`(redacted, N chars)`.
+A `changed` event carries the new snapshot after every committed change, and a
+`stale` event carries `{ modelID }` when a request selects a model retained as
+stale. Each event and call carries a `location`; external clients receive events
+from every location and must filter. The snapshot never contains the key, only
+`(redacted, N chars)`; it also reports `catalogModels`, `catalogFetchedAt`,
+`catalogStaleModels`/`catalogStaleIds` and `catalogFromCache`.
 
 ## Model mapping
 
@@ -157,8 +174,31 @@ only when present, and a missing field is never turned into claimed support:
 
 A plain OpenAI listing (`{ data: [...] }`) is accepted as a fallback with those
 defaults. A response that is neither shape — an error page, a proxy error, a
-broken body — is an error, never an empty catalog. An empty directory is reported
-as empty. No cost information is invented.
+broken body — is an error, never an empty catalog. An empty directory is a
+success and is reported as empty. No cost information is invented.
+
+### Cache, refresh and stale models
+
+The directory is cached per connection in OpenCode's plugin storage, keyed by a
+one-way fingerprint of the address and key. The key itself is never written, and
+one credential's directory is never served to another.
+
+- On startup a matching cache is registered immediately, then refreshed in the
+  background. Without a matching cache the first read is awaited before models
+  are registered.
+- A refresh that fails (timeout, 401/403, 5xx, a broken body) leaves the last
+  good directory in place and reports the failure; it never publishes an empty
+  catalog.
+- A successful read replaces the directory and clears stale marks. Models the
+  directory no longer lists are retained and marked stale for the retention
+  window (seven days by default, measured from the first miss), then dropped. A
+  model that reappears becomes current again.
+- Stale models stay registered and selectable. Selecting one emits the `stale`
+  warning and the TUI shows the stale count; the plugin never claims the
+  upstream still serves it.
+- Every refresh checks the connection generation and a request token before it
+  commits, so a slow refresh from a replaced connection, a connection switch, or
+  an unload cannot overwrite newer state.
 
 ## Isolated host run
 
@@ -186,8 +226,19 @@ snapshot after a disconnect.
 bun run smoke:connection
 ```
 
-Both talk to a loopback mock CPA only: no real credential, no real CPA request,
-no cost. `SMOKE_DEBUG=1` also dumps the request sequence of the smoke run.
+`scripts/host-catalog.mjs` covers the cache and stale slice: a restart serving a
+matching cache before the background refresh lands, a failed refresh keeping the
+last directory, a legal empty directory staying distinct from a failure, manual
+refresh over RPC, stale retention, recovery and expiry, the stale warning
+emitted for a real request, and per-credential cache isolation.
+
+```bash
+bun run smoke:catalog
+```
+
+All three talk to a loopback mock CPA only: no real credential, no real CPA
+request, no cost. `SMOKE_DEBUG=1` also dumps the request sequence of the smoke
+run.
 
 ## Development
 
@@ -197,15 +248,15 @@ tests and the host scripts against that `node_modules`.
 ```bash
 npm ci                 # install the locked development dependencies
 bun test               # unit + native-runtime integration tests
-bun test test/unit     # directory parsing, mapping, connection, state, RPC, TUI view
+bun test test/unit     # directory parsing, mapping, cache/stale, connection, state, RPC, TUI view
 bun test test/integration   # real Responses serialization and SSE parsing
 bun run typecheck      # tsc --noEmit
 ```
 
 The integration tests drive `@opencode/ai/providers/openai-compatible/responses`
 over real HTTP against the mock CPA, so serialization and stream parsing are the
-host's own code rather than a stub. `scripts/host-connection.mjs` additionally
-drives the real host over its HTTP RPC as a remote client.
+host's own code rather than a stub. The host scripts additionally drive the real
+host over its HTTP RPC, both as a remote client and as a catalog reader.
 
 ## Observations and limits
 
@@ -213,12 +264,20 @@ drives the real host over its HTTP RPC as a remote client.
   `>=2.0.26 <3`, refused.
 - With this runtime package the transport defaults to HTTP/SSE for a
   plugin-registered provider; WebSocket behaviour is not validated here.
-- `opencode models` and `model.list` resolve a location of their own and do not
-  show location-scoped plugin models; model availability is exercised through a
-  real session instead.
+- The `opencode models` CLI resolves a location of its own and does not show
+  location-scoped plugin models; the API's `model.list` with an explicit
+  location does, and model availability is also exercised through a real
+  session.
 - The interactive wizard masks the key and verifies before saving, but the host
   offers no password input for plugins, so the masked field is drawn by the
   plugin while the host's dialog API provides the frame.
+- The directory cache lives in OpenCode's own plugin storage. Clearing that data
+  only removes the fast start; the next setup reads the directory live again.
+- Stale models stay registered and selectable, and the warning is the `stale`
+  RPC event plus the TUI status, not a disabled model. The retention window is
+  seven days by default and is shortened through `catalogStaleTtlMs` in the
+  isolated host run.
 - No real CPA deployment has been contacted. Tool round-trips, image input,
-  summary compaction and the connection experience were validated against a mock
-  CPA that speaks the same Responses and directory wire format.
+  summary compaction, the connection experience and the catalog cache/refresh/
+  stale behaviour were validated against a mock CPA that speaks the same
+  Responses and directory wire format.

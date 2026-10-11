@@ -88,6 +88,12 @@ export const REQUIRED_FUNCTIONS: readonly string[] = [
   "integration.connection.resolve",
   "provider.transform",
   "rpc.register",
+  // Used to warn when a request selects a model retained as stale.
+  "session.hook",
+  // The directory cache lives in the host's own plugin storage; without it a
+  // restart could not reuse a matching connection's models.
+  "storage.get",
+  "storage.set",
 ]
 
 /** Plain data the plugin reads during setup. */

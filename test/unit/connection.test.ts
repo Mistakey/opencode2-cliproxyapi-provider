@@ -50,6 +50,16 @@ describe("readExplicitConfig", () => {
     expect(readExplicitConfig({}, { [ENV_BASE_URL]: "http://env.test" }).sources).toEqual({ baseURL: "env" })
     expect(readExplicitConfig(undefined, {}).sources).toEqual({})
   })
+
+  test("accepts positive catalog tuning options and ignores unusable ones", () => {
+    const configured = readExplicitConfig({ catalogTimeoutMs: 2500, catalogStaleTtlMs: 3000 }, {})
+    expect(configured.catalogTimeoutMs).toBe(2500)
+    expect(configured.catalogStaleTtlMs).toBe(3000)
+
+    const rejected = readExplicitConfig({ catalogTimeoutMs: 0, catalogStaleTtlMs: -1 }, {})
+    expect(rejected.catalogTimeoutMs).toBeUndefined()
+    expect(rejected.catalogStaleTtlMs).toBeUndefined()
+  })
 })
 
 describe("planConnection", () => {
