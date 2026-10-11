@@ -307,6 +307,10 @@ as a remote client.
 - The WebSocket matrix was checked against OpenCode `2.0.26` and a mock CPA that
   applies CPA's transcript state machine; it is not a claim about a real CPA
   deployment.
+- The WebSocket runtime package is the native OpenAI Responses route, so it
+  applies the host's OpenAI defaults for `gpt-5*` model ids (reasoning effort
+  `medium`, reasoning summary `auto`); the HTTP-only compatible package does not.
+  The rest of the body is identical.
 - `opencode models` and `model.list` resolve a location of their own and do not
   show location-scoped plugin models; model availability is exercised through a
   real session instead.
