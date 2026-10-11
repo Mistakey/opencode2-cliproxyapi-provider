@@ -9,7 +9,7 @@
 
 import { Integration } from "@opencode/plugin"
 import type { Credential } from "@opencode/plugin"
-import { DEFAULT_BASE_URL } from "./address"
+import { DEFAULT_BASE_URL, resolveEndpoints } from "./address"
 import { WEBSOCKET_RUNTIME_PACKAGE, readCompactionPreference, readTransportPreference, type CompactionPreference, type TransportPreference } from "./transport"
 
 export const ENV_BASE_URL = "CLIPROXYAPI_BASE_URL"
@@ -67,6 +67,60 @@ function optionBoolean(options: Record<string, unknown>, key: string): boolean |
   return typeof value === "boolean" ? value : undefined
 }
 
+/**
+ * Pair the explicit address and key across plugin options and the environment.
+ *
+ * The address wins its key: a key is only taken from the other source when that
+ * source does not configure a different address. That keeps the documented
+ * per-field precedence (an option address with an environment key is fine when
+ * the environment has no address of its own) while refusing to pair an address
+ * with a key that was configured for another address.
+ */
+function pairExplicit(input: {
+  optionBaseURL?: string
+  optionApiKey?: string
+  envBaseURL?: string
+  envApiKey?: string
+}): { baseURL?: string; apiKey?: string; sources: ConfigSources } {
+  const { optionBaseURL, optionApiKey, envBaseURL, envApiKey } = input
+  const baseURL = optionBaseURL ?? envBaseURL
+  const addressSource: ConfigSource | undefined =
+    baseURL === undefined ? undefined : optionBaseURL !== undefined ? "options" : "env"
+  let apiKey: string | undefined
+  let keySource: ConfigSource | undefined
+  if (addressSource === "options") {
+    if (optionApiKey !== undefined) {
+      apiKey = optionApiKey
+      keySource = "options"
+    } else if (envApiKey !== undefined && (envBaseURL === undefined || sameAddress(envBaseURL, optionBaseURL!))) {
+      apiKey = envApiKey
+      keySource = "env"
+    }
+  } else if (addressSource === "env") {
+    if (envApiKey !== undefined) {
+      apiKey = envApiKey
+      keySource = "env"
+    } else if (optionApiKey !== undefined) {
+      apiKey = optionApiKey
+      keySource = "options"
+    }
+  } else if (optionApiKey !== undefined) {
+    apiKey = optionApiKey
+    keySource = "options"
+  } else if (envApiKey !== undefined) {
+    apiKey = envApiKey
+    keySource = "env"
+  }
+  return {
+    ...(baseURL !== undefined ? { baseURL } : {}),
+    ...(apiKey !== undefined ? { apiKey } : {}),
+    sources: {
+      ...(addressSource !== undefined ? { baseURL: addressSource } : {}),
+      ...(keySource !== undefined ? { apiKey: keySource } : {}),
+    } as ConfigSources,
+  }
+}
+
 /** Read explicit, no-UI configuration: plugin options first, then environment. */
 export function readExplicitConfig(
   options: Record<string, unknown> | undefined,
@@ -75,19 +129,18 @@ export function readExplicitConfig(
   const opts = options ?? {}
   const envBaseURL = typeof env[ENV_BASE_URL] === "string" && env[ENV_BASE_URL]!.trim() ? env[ENV_BASE_URL]!.trim() : undefined
   const envApiKey = typeof env[ENV_API_KEY] === "string" && env[ENV_API_KEY]!.trim() ? env[ENV_API_KEY]!.trim() : undefined
-  const optionBaseURL = optionString(opts, "baseURL")
-  const optionApiKey = optionString(opts, "apiKey")
-  const baseURL = optionBaseURL ?? envBaseURL
-  const apiKey = optionApiKey ?? envApiKey
+  const pair = pairExplicit({
+    optionBaseURL: optionString(opts, "baseURL"),
+    optionApiKey: optionString(opts, "apiKey"),
+    ...(envBaseURL !== undefined ? { envBaseURL } : {}),
+    ...(envApiKey !== undefined ? { envApiKey } : {}),
+  })
   const transport = readTransportPreference(opts)
   const compaction = readCompactionPreference(opts)
   return {
-    baseURL,
-    apiKey,
-    sources: {
-      ...(baseURL !== undefined ? { baseURL: optionBaseURL !== undefined ? "options" : "env" } : {}),
-      ...(apiKey !== undefined ? { apiKey: optionApiKey !== undefined ? "options" : "env" } : {}),
-    } as ConfigSources,
+    baseURL: pair.baseURL,
+    apiKey: pair.apiKey,
+    sources: pair.sources,
     providerID: optionString(opts, "providerID") ?? DEFAULT_PROVIDER_ID,
     providerName: optionString(opts, "providerName") ?? "CLIProxyAPI",
     integrationID: Integration.ID.make(optionString(opts, "integrationID") ?? DEFAULT_INTEGRATION_ID),
@@ -142,11 +195,28 @@ export interface ConnectionPlan {
 export type ConnectionPlanResult = { ok: true; plan: ConnectionPlan } | { ok: false; reason: string }
 
 /**
+ * Whether two configured addresses denote the same CPA connection endpoint.
+ *
+ * A stored credential carries the address it was saved with. Borrowing its key
+ * for a different explicit address would send that key to an address it was
+ * never configured for, so the two must be compared after normalization.
+ */
+function sameAddress(left: string, right: string): boolean {
+  if (left.trim() === right.trim()) return true
+  try {
+    return resolveEndpoints(left).baseURL === resolveEndpoints(right).baseURL
+  } catch {
+    return false
+  }
+}
+
+/**
  * Decide which address and key to use.
  *
- * An explicitly configured address or key always wins, so an environment
- * variable can never be silently mixed with an unrelated stored connection. The
- * stored address only fills a gap an explicit configuration leaves open.
+ * A connection is a pair. An explicit address or key always wins, but the stored
+ * credential may only supply the half an explicit configuration leaves open when
+ * it belongs to the same address; a stored key is never lent to a different
+ * address. The stored address only fills the gap an explicit key leaves open.
  */
 export function planConnection(input: {
   explicit: Pick<ExplicitConfig, "baseURL" | "apiKey"> & { sources?: ConfigSources }
@@ -176,13 +246,31 @@ export function planConnection(input: {
     }
   }
 
-  // A configured address with no key anywhere is a partial configuration: it is
-  // refused rather than completed from an unrelated source. A configured key
-  // without an address keeps the stored address when there is one, and is
-  // otherwise reported as the default address.
+  // A configured address with no configured key is completed only from a stored
+  // credential saved for that same address. Anything else is a partial
+  // configuration and is refused rather than paired with an unrelated key.
+  if (explicit.baseURL !== undefined && explicit.apiKey === undefined) {
+    if (!active || !active.baseURL || !sameAddress(explicit.baseURL, active.baseURL)) {
+      return { ok: false, reason: `CPA address is configured without an API key; set ${ENV_API_KEY}` }
+    }
+    return {
+      ok: true,
+      plan: {
+        mode: "explicit",
+        key: active.key,
+        address: explicit.baseURL,
+        store: false,
+        addressSource: sources.baseURL ?? "options",
+        keySource: "stored",
+      },
+    }
+  }
+
+  // A configured key with no configured address keeps the stored address when
+  // there is one, and otherwise reports the default address.
   const key = explicit.apiKey ?? active?.key
   if (!key) {
-    return { ok: false, reason: `CPA address is configured without an API key; set ${ENV_API_KEY}` }
+    return { ok: false, reason: `no CPA API key configured; set ${ENV_API_KEY} or connect CLIProxyAPI` }
   }
   const keySource: ConfigSource = explicit.apiKey !== undefined ? (sources.apiKey ?? "options") : "stored"
   const addressSource: ConfigSource =

@@ -20,7 +20,7 @@ function completeContext(): Record<string, unknown> {
       connect: { key: fn },
       connection: { active: fn, resolve: fn },
     },
-    provider: { transform: fn },
+    provider: { transform: fn, reload: fn },
     rpc: { register: fn },
     session: { hook: fn },
     storage: { get: fn, set: fn, remove: fn },
@@ -85,7 +85,7 @@ describe("checkHostInterfaces", () => {
 describe("inspectHost", () => {
   test("reports version and interface issues together", () => {
     const ctx = completeContext()
-    delete (ctx as { provider?: unknown }).provider
+    delete (ctx.provider as { transform?: unknown }).transform
     const report = inspectHost({ version: "1.0.0", ctx })
     expect(report.ok).toBe(false)
     expect(report.issues.map((issue) => issue.code)).toEqual(["version", "interface"])

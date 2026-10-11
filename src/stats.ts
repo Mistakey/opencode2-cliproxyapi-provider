@@ -329,6 +329,14 @@ export class SessionStatsTracker {
   #closeTurn(record: SessionRecord, at: number): void {
     const turn = record.turn
     if (!turn) return
+    // A pause wait that is still open when the turn closes was part of this
+    // turn's wall time (an interruption cancels it before the gate reports the
+    // end), so attribute the wait up to the close and clear it rather than
+    // letting the later pause-end find no turn to charge.
+    if (record.pauseStartedAt !== undefined) {
+      turn.pausedMs += Math.max(0, at - Math.max(record.pauseStartedAt, turn.startedAt))
+      record.pauseStartedAt = undefined
+    }
     turn.endedAt = at
     turn.durationMs = Math.max(0, at - turn.startedAt)
     turn.effectiveMs = Math.max(0, turn.durationMs - turn.pausedMs)

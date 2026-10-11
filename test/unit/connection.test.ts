@@ -43,10 +43,24 @@ describe("readExplicitConfig", () => {
   })
 
   test("records which explicit source supplied each half", () => {
-    expect(readExplicitConfig({ baseURL: "http://option.test" }, { [ENV_API_KEY]: "env-key" }).sources).toEqual({
-      baseURL: "options",
-      apiKey: "env",
+    // An environment key is paired with an option address when the environment
+    // configures no address of its own.
+    expect(readExplicitConfig({ baseURL: "http://option.test" }, { [ENV_API_KEY]: "env-key" })).toMatchObject({
+      baseURL: "http://option.test",
+      apiKey: "env-key",
+      sources: { baseURL: "options", apiKey: "env" },
     })
+    // An environment key that belongs to a different environment address is not
+    // lent to the option address.
+    expect(
+      readExplicitConfig(
+        { baseURL: "http://option.test" },
+        { [ENV_BASE_URL]: "http://env.test", [ENV_API_KEY]: "env-key" },
+      ),
+    ).toMatchObject({ baseURL: "http://option.test", apiKey: undefined, sources: { baseURL: "options" } })
+    expect(
+      readExplicitConfig({}, { [ENV_BASE_URL]: "http://env.test", [ENV_API_KEY]: "env-key" }).sources,
+    ).toEqual({ baseURL: "env", apiKey: "env" })
     expect(readExplicitConfig({}, { [ENV_BASE_URL]: "http://env.test" }).sources).toEqual({ baseURL: "env" })
     expect(readExplicitConfig(undefined, {}).sources).toEqual({})
   })
@@ -121,19 +135,25 @@ describe("planConnection", () => {
     expect(result.ok === true && result.plan.store).toBe(true)
   })
 
-  test("uses the stored key for an address-only override and reports both sources", () => {
-    const result = planConnection({ explicit: { baseURL: "http://override.test" }, active })
+  test("reuses the stored key for a configured address that is the same connection", () => {
+    const result = planConnection({ explicit: { baseURL: "http://stored.test" }, active })
     expect(result).toEqual({
       ok: true,
       plan: {
         mode: "explicit",
         key: "stored-key",
-        address: "http://override.test",
+        address: "http://stored.test",
         store: false,
         addressSource: "options",
         keySource: "stored",
       },
     })
+  })
+
+  test("refuses a configured address that is not the stored credential's connection", () => {
+    const result = planConnection({ explicit: { baseURL: "http://other.test" }, active })
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.reason).toContain(ENV_API_KEY)
   })
 
   test("refuses an address without any key to pair it with", () => {

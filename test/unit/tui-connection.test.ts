@@ -214,7 +214,20 @@ describe("createConnectionView", () => {
 
   test("applies verify and connect reports to the view", async () => {
     const fake = fakeRpc()
-    const view = createConnectionView({ rpc: fake.rpc, directory: "/work/one" })
+    const order: string[] = []
+    const view = createConnectionView({
+      rpc: {
+        ...fake.rpc,
+        status: async () => {
+          order.push("status")
+          return snapshot({ address: "http://new.test" })
+        },
+      },
+      directory: "/work/one",
+      reload: async () => {
+        order.push("reload")
+      },
+    })
 
     const probe = await view.verify("http://new.test", "sk-fake")
     expect(probe.ok).toBe(true)
@@ -222,7 +235,25 @@ describe("createConnectionView", () => {
 
     const saved = await view.connect("http://new.test", "sk-fake")
     expect(saved.ok).toBe(true)
+    // A committed connect reloads the location so the new connection reaches
+    // the wire, then re-reads the authoritative snapshot.
+    expect(order).toEqual(["reload", "status"])
     expect(view.snapshot()?.address).toBe("http://new.test")
+  })
+
+  test("does not reload the location when a connect fails", async () => {
+    const fake = fakeRpc({ connect: async () => ({ ok: false, kind: "auth", message: "bad key" }) })
+    const order: string[] = []
+    const view = createConnectionView({
+      rpc: fake.rpc,
+      directory: "/work/one",
+      reload: async () => {
+        order.push("reload")
+      },
+    })
+    const saved = await view.connect("http://new.test", "sk-fake")
+    expect(saved.ok).toBe(false)
+    expect(order).toEqual([])
   })
 
   test("persists Fast, reloads the location and re-reads the authoritative snapshot", async () => {
@@ -265,7 +296,11 @@ describe("createConnectionView", () => {
 
   test("refreshes the catalog over RPC and applies the returned snapshot", async () => {
     const fake = fakeRpc()
-    const view = createConnectionView({ rpc: fake.rpc, directory: "/work/one" })
+    const view = createConnectionView({
+      rpc: { ...fake.rpc, status: async () => snapshot({ catalogFetchedAt: 1 }) },
+      directory: "/work/one",
+      reload: async () => undefined,
+    })
     const report = await view.refreshCatalog()
     expect(report.ok).toBe(true)
     expect(report.models).toBe(2)

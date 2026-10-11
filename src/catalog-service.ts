@@ -85,6 +85,8 @@ export class CatalogService {
   #token = 0
   #controller: AbortController | undefined
   #disposed = false
+  /** Order of issued commits; the newest one owns the served record and cache. */
+  #commitSeq = 0
 
   constructor(input: CatalogServiceInput) {
     this.#store = input.store
@@ -105,6 +107,20 @@ export class CatalogService {
 
   isStale(modelID: string): boolean {
     return isStaleModel(this.#record, modelID)
+  }
+
+  /**
+   * Track a new connection generation without changing the active identity.
+   *
+   * A connect reserves a generation before it knows whether the candidate will
+   * verify. Adopting it here keeps the active connection's refreshes valid under
+   * the new generation and drops an in-flight read of the previous one, so a
+   * failed candidate leaves the service exactly as it was, only newer.
+   */
+  adoptGeneration(generation: number): void {
+    if (this.#disposed) return
+    this.#abortInflight()
+    this.#generation = generation
   }
 
   /**
@@ -199,6 +215,11 @@ export class CatalogService {
   ): Promise<CatalogRecord | undefined> {
     const identity = this.#identity
     if (!identity) return undefined
+    if (this.#disposed || this.#generation !== generation) return undefined
+    // The commit order decides ownership: a refresh issued later always has a
+    // higher sequence, so an earlier commit whose storage write is still pending
+    // may not publish, and must leave the newer record in the cache.
+    const seq = ++this.#commitSeq
     const record = mergeCatalog({
       previous: this.#record,
       entries,
@@ -208,10 +229,6 @@ export class CatalogService {
       now: this.#now(),
       ...(this.#staleTtlMs !== undefined ? { staleTtlMs: this.#staleTtlMs } : {}),
     })
-
-    // The connection may have changed while the read was in flight; a stale
-    // result is dropped before it can touch the cache or the provider.
-    if (this.#disposed || this.#generation !== generation) return undefined
     this.#record = record
     try {
       await this.#store.save(record)
@@ -219,6 +236,20 @@ export class CatalogService {
       // Losing the cache write is not worth failing a good live directory.
     }
     if (this.#disposed || this.#generation !== generation) return undefined
+    if (seq !== this.#commitSeq) {
+      // A newer commit was issued while this write was pending. It may have
+      // written the cache first and been overwritten by this one, so restore
+      // whatever the newest commit made current before dropping out.
+      const newest = this.#record
+      if (newest && newest !== record) {
+        try {
+          await this.#store.save(newest)
+        } catch {
+          // Same as above: the live directory is already correct.
+        }
+      }
+      return undefined
+    }
     await this.#onCommit({ generation, record, fromCache: false, kind })
     return record
   }

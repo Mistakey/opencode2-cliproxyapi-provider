@@ -87,6 +87,7 @@ export const REQUIRED_FUNCTIONS: readonly string[] = [
   "integration.connection.active",
   "integration.connection.resolve",
   "provider.transform",
+  "provider.reload",
   "rpc.register",
   "session.hook",
   // The session event stream feeds the pause gate's cancellation and the

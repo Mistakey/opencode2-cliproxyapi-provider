@@ -101,14 +101,18 @@ A **connection** is one address plus one API key, and both belong together.
 | environment | `CLIPROXYAPI_BASE_URL` | `CLIPROXYAPI_API_KEY` |
 | stored connection | saved with the key | saved by OpenCode |
 
-Precedence is plugin options, then environment, then the stored connection. Each
-half is resolved independently, and the snapshot always reports which source
-supplied it (`addressSource` / `keySource`), so a stored address is never mixed
-with an explicit key silently:
+Precedence is plugin options, then environment, then the stored connection. An
+address and a key are one connection, so a key is never paired with an address it
+was not configured for. The snapshot always reports which source supplied each
+half (`addressSource` / `keySource`).
 
-- an explicitly configured address or key wins over the stored half;
-- an explicit address with no key anywhere is a **partial configuration** and is
-  refused instead of being completed from an unrelated source;
+- the address comes from plugin options first, then the environment;
+- its key is taken from the same source, or from the other explicit source when
+  that source configures no address of its own (or the same one); an explicit key
+  that belongs to a different address is not used;
+- an explicit address with no usable explicit key is completed from the stored
+  credential only when that credential was saved for the same address; otherwise
+  it is a **partial configuration** and is refused;
 - an explicit key with no address keeps the stored address when there is one and
   otherwise uses `http://127.0.0.1:8317`;
 - when an explicit key differs from the stored credential, the plugin stores it
@@ -216,8 +220,8 @@ With the plugin loaded, the TUI entry registers:
 | Command | What it does |
 | --- | --- |
 | `/cpa-status` | Reads the snapshot over RPC and shows address, saved key hint, verification state, model count, last refresh, stale models, the Fast preference, the price source, the pause state and the last error |
-| `/cpa-refresh` | Asks the server to read the CPA directory again, bypassing the cache |
-| `/cpa-connect` | Prompts for the address, reads the key with a **masked** input, verifies, then saves |
+| `/cpa-refresh` | Asks the server to read the CPA directory again, bypassing the cache, then reloads the location so the new directory reaches the provider registry |
+| `/cpa-connect` | Prompts for the address, reads the key with a **masked** input, verifies, saves, then reloads the location so the new connection reaches the provider registry |
 | `/cpa-fast` | Toggles the Fast preference, then reloads the location so it reaches the provider registry |
 | `/cpa-pause` | Stops the next CPA request; one already in flight completes |
 | `/cpa-resume` | Releases the waiting CPA requests |

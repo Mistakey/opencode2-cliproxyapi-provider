@@ -346,8 +346,15 @@ export function createConnectionView(input: {
     statsAttempted.add(sessionID)
     try {
       const response = await input.rpc.stats({ sessionID })
-      const parsed = isRecord(response) ? parseStats(response.stats) : undefined
-      if (parsed) statsCache.set(sessionID, parsed)
+      if (isRecord(response)) {
+        // An authoritative answer without stats means the server no longer
+        // knows this session (for example after a reload), so the stale cache
+        // must go instead of being rendered as current. A malformed response is
+        // not treated as absence: it leaves the last known stats in place.
+        const parsed = parseStats(response.stats)
+        if (parsed) statsCache.set(sessionID, parsed)
+        else statsCache.delete(sessionID)
+      }
       connected = true
       lastError = undefined
     } catch (error) {
@@ -382,6 +389,19 @@ export function createConnectionView(input: {
     }
   }
 
+  // The host compiles the provider registry when the location boots, so a
+  // committed connection or directory change only reaches the wire after a
+  // reload. The TUI performs it instead of asking the user to. A reload failure
+  // is not fatal: the change is already persisted and applies on the next boot.
+  const reloadForEffect = async (): Promise<void> => {
+    try {
+      await input.reload?.()
+    } catch {
+      // Reported through the refreshed snapshot instead of failing the operation.
+    }
+    await refresh()
+  }
+
   return {
     snapshot: () => snapshot,
     connected: () => connected,
@@ -398,7 +418,11 @@ export function createConnectionView(input: {
       if (sessionID) await refreshStats(sessionID)
     },
     refresh,
-    refreshCatalog: async () => applyReport(parseReport(await input.rpc.refresh({}))),
+    refreshCatalog: async () => {
+      const report = applyReport(parseReport(await input.rpc.refresh({})))
+      if (report.ok) await reloadForEffect()
+      return report
+    },
     subscribe: () => {
       const stopChanged = input.rpc.events.on("changed", (event) => {
         if (!matchesLocation(event, input.directory)) return
@@ -436,19 +460,14 @@ export function createConnectionView(input: {
       const report = parseReport(await input.rpc.verify(key === undefined ? { address } : { address, key }))
       return applyReport(report)
     },
-    connect: async (address, key) => applyReport(parseReport(await input.rpc.connect({ address, key }))),
+    connect: async (address, key) => {
+      const report = applyReport(parseReport(await input.rpc.connect({ address, key })))
+      if (report.ok) await reloadForEffect()
+      return report
+    },
     setFast: async (enabled) => {
       const report = parseReport(await input.rpc.setFast({ enabled }))
-      // The host compiles the provider registry when the location boots, so the
-      // persisted preference only reaches the wire after this reload. A reload
-      // failure is not fatal: the preference is already stored and applies on
-      // the next boot.
-      try {
-        await input.reload?.()
-      } catch {
-        // Reported through the refreshed snapshot instead of failing the toggle.
-      }
-      await refresh()
+      await reloadForEffect()
       return report ?? { ok: false, kind: "unreachable", message: "the server returned an unexpected response" }
     },
     pauseRequests: () => applyPauseResult(input.rpc.pause({})),

@@ -91,37 +91,64 @@ async function registerIntegration(
   })
 }
 
-/** Bind a directory's models to the connection that produced them. */
-async function bindProvider(
-  ctx: Context,
-  input: {
-    providerID: Provider.ID
-    providerName: string
-    integrationID: ExplicitConfig["integrationID"]
-    packageID: string
-    transport: TransportPolicy["transport"]
-    compaction: CompactionPolicy["type"]
-    baseURL: string
-    models: readonly Model.Info[]
-    sourceConnection?: ActiveConnection
-  },
-): Promise<void> {
-  await ctx.provider.transform((editor) => {
+/** The directory inventory bound to one CPA connection. */
+interface ProviderBinding {
+  readonly providerID: Provider.ID
+  readonly providerName: string
+  readonly integrationID: ExplicitConfig["integrationID"]
+  readonly packageID: string
+  readonly transport: TransportPolicy["transport"]
+  readonly compaction: CompactionPolicy["type"]
+  readonly baseURL: string
+  readonly models: readonly Model.Info[]
+  readonly sourceConnection?: ActiveConnection
+}
+
+interface ProviderBinder {
+  /** Replace the bound directory and rebuild the registry that resolves it. */
+  bind(input: ProviderBinding): Promise<void>
+  dispose(): Promise<void>
+}
+
+/**
+ * Keep one provider transform registered and republish the current binding.
+ *
+ * The host replays the registered callback on every registry rebuild, so the
+ * callback has to read the *current* binding: registering a fresh transform per
+ * refresh would leave the stale captured inventory in place, and a `reload()`
+ * would replay that stale inventory. `bind` also calls `provider.reload()`, which
+ * is the public way to carry a changed binding into the registry.
+ */
+async function createProviderBinder(ctx: Context): Promise<ProviderBinder> {
+  let binding: ProviderBinding | undefined
+  const registration = await ctx.provider.transform((editor) => {
+    if (!binding) return
     editor.add({
       info: {
-        ...Provider.Info.empty(input.providerID),
-        name: input.providerName,
+        ...Provider.Info.empty(binding.providerID),
+        name: binding.providerName,
         activation: "enabled",
-        integrationID: input.integrationID,
-        package: input.packageID,
+        integrationID: binding.integrationID,
+        package: binding.packageID,
         // The transport is an explicit provider setting: the host falls back to
         // HTTP/SSE with a warning when the chosen package has no WS channel.
-        settings: { baseURL: input.baseURL, transport: input.transport, compaction: { type: input.compaction } },
+        settings: {
+          baseURL: binding.baseURL,
+          transport: binding.transport,
+          compaction: { type: binding.compaction },
+        },
       },
-      models: input.models,
-      ...(input.sourceConnection ? { sourceConnection: input.sourceConnection } : {}),
+      models: binding.models,
+      ...(binding.sourceConnection ? { sourceConnection: binding.sourceConnection } : {}),
     })
   })
+  return {
+    async bind(input) {
+      binding = input
+      await ctx.provider.reload()
+    },
+    dispose: () => registration.dispose(),
+  }
 }
 
 function readString(input: unknown, key: string): string | undefined {
@@ -210,6 +237,11 @@ async function setupConnection(ctx: Context) {
   })
 
   await registerIntegration(ctx, explicit, integrationID)
+
+  // The provider transform is registered once and always reads the current
+  // binding, so a rebuild after a connection change republishes the new
+  // directory instead of replaying a stale captured inventory.
+  const binder = await createProviderBinder(ctx)
 
   // A summary must drop CPA's server-side continuation state. The handshake
   // hook is the public way to make the host open a fresh socket for the next
@@ -307,6 +339,18 @@ async function setupConnection(ctx: Context) {
 
   // A stale model is warned about once per selection, not on every request.
   let notifiedStale: string | undefined
+  // Interactive connects verify before they touch anything, and only one commit
+  // may be in flight at a time: a later connect supersedes an earlier one and
+  // the earlier one must not save its credential after the later one committed.
+  let connectQueue: Promise<unknown> = Promise.resolve()
+  const withConnectLock = <T,>(task: () => Promise<T>): Promise<T> => {
+    const run = connectQueue.then(task, task)
+    connectQueue = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
+  }
   const service = new CatalogService({
     store,
     read: ({ identity, signal }) =>
@@ -324,7 +368,7 @@ async function setupConnection(ctx: Context) {
       const policy = policyFor(record.models.map((state) => state.entry))
       const compaction = compactionFor(policy)
       const connection = await ctx.integration.connection.active(integrationID)
-      await bindProvider(ctx, {
+      await binder.bind({
         providerID,
         providerName: explicit.providerName,
         integrationID,
@@ -449,7 +493,12 @@ async function setupConnection(ctx: Context) {
         return { ok: false, kind: "address", message: detail, snapshot: state.read() }
       }
 
+      // Reserving the generation here (not inside the lock) means a later
+      // connect immediately supersedes an earlier one that is still verifying.
+      // The service adopts it too, so a candidate that never verifies leaves the
+      // active connection refreshable under the new generation.
       const generation = state.begin()
+      service.adoptGeneration(generation)
       const identity: CatalogIdentity = {
         address,
         key,
@@ -457,54 +506,60 @@ async function setupConnection(ctx: Context) {
         modelsURL: endpoints.modelsURL,
         fingerprint: connectionFingerprint(endpoints.baseURL, key),
       }
-      // Applied synchronously, so a refresh for the previous connection can no
-      // longer commit even while this one is still being verified.
-      await service.activate(identity, generation)
 
-      const outcome = await verifyConnection({
-        address,
-        apiKey: key,
-        ...(explicit.catalogTimeoutMs !== undefined ? { timeoutMs: explicit.catalogTimeoutMs } : {}),
-      })
-      if (!state.isCurrent(generation)) {
-        return {
-          ok: false,
-          kind: "unreachable",
+      return withConnectLock(async () => {
+        const changed = {
+          ok: false as const,
+          kind: "unreachable" as const,
           message: "the connection changed while this pair was being verified; nothing was saved",
           snapshot: state.read(),
         }
-      }
-      if (!outcome.ok) {
+        if (!state.isCurrent(generation)) return changed
+
+        // The candidate is verified before the active connection is touched, so
+        // a failed attempt leaves the service, its cache and the credential
+        // exactly as they were.
+        const outcome = await verifyConnection({
+          address,
+          apiKey: key,
+          ...(explicit.catalogTimeoutMs !== undefined ? { timeoutMs: explicit.catalogTimeoutMs } : {}),
+        })
+        if (!state.isCurrent(generation)) return changed
+        if (!outcome.ok) {
+          return {
+            ok: false as const,
+            kind: outcome.kind,
+            ...(outcome.message !== undefined ? { message: outcome.message } : {}),
+            snapshot: state.read(),
+          }
+        }
+
+        // Verified: bind the service to this pair and commit it as one unit.
+        // Activating invalidates any in-flight read of the previous connection.
+        await service.activate(identity, generation)
+        if (!state.isCurrent(generation)) return changed
+        await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
+        if (!state.isCurrent(generation)) return changed
+        await service.applyRead({ generation, entries: outcome.entries, kind: outcome.kind })
+        await publish(
+          connectionUpdate({
+            address,
+            addressSource: "wizard",
+            keySource: "wizard",
+            key,
+            keySaved: true,
+            verified: "ok",
+            verifyKind: outcome.kind,
+          }),
+          generation,
+        )
         return {
-          ok: false,
+          ok: true,
           kind: outcome.kind,
-          ...(outcome.message !== undefined ? { message: outcome.message } : {}),
+          models: service.current()?.models.length ?? outcome.entries.length,
           snapshot: state.read(),
         }
-      }
-
-      await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
-      // Commits the merged catalog (fresh plus any stale models of this
-      // connection) and rebinds the provider, including its transport.
-      await service.applyRead({ generation, entries: outcome.entries, kind: outcome.kind })
-      await publish(
-        connectionUpdate({
-          address,
-          addressSource: "wizard",
-          keySource: "wizard",
-          key,
-          keySaved: true,
-          verified: "ok",
-          verifyKind: outcome.kind,
-        }),
-        generation,
-      )
-      return {
-        ok: true,
-        kind: outcome.kind,
-        models: service.current()?.models.length ?? outcome.entries.length,
-        snapshot: state.read(),
-      }
+      })
     },
 
     // Persist the Fast preference. The registered models only change when the
@@ -611,6 +666,7 @@ async function setupConnection(ctx: Context) {
     subscription.abort()
     pause.releaseAll()
     service.dispose()
+    await binder.dispose()
     await hook.dispose()
     await staleHook?.dispose()
     await registration?.dispose()
@@ -685,7 +741,7 @@ async function setupConnection(ctx: Context) {
     // model selects the same transport it would after a fresh read.
     const policy = policyFor(cached.models.map((state) => state.entry))
     const compaction = compactionFor(policy)
-    await bindProvider(ctx, {
+    await binder.bind({
       providerID,
       providerName: explicit.providerName,
       integrationID,

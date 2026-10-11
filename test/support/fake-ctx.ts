@@ -20,6 +20,8 @@ export interface FakeHost {
   connectCalls: { integrationID: string; key: string; answer?: Record<string, string> }[]
   rpcRegistrations: { definition: { id: string; methods: Record<string, unknown> }; handlers: Record<string, unknown> }[]
   rpcEvents: { name: string; data: unknown }[]
+  /** How many times the plugin asked the host to rebuild the provider registry. */
+  providerReloads: () => number
   /** Values written through `ctx.storage`, keyed as the plugin keyed them. */
   storage: Map<string, unknown>
   sessionHooks: {
@@ -89,6 +91,23 @@ export function createFakeHost(options: {
   }
 
   let nextCredential = credentials.length + 1
+
+  const providerTransforms: ((editor: unknown) => void)[] = []
+  let providerReloads = 0
+  const providerEditor = {
+    list: () => providers,
+    get: (providerID: string) =>
+      providers.find((entry) => (entry.info as { id?: string } | undefined)?.id === providerID),
+    add: (input: Record<string, unknown>) => {
+      const id = (input.info as { id?: string } | undefined)?.id
+      const index = providers.findIndex((entry) => (entry.info as { id?: string } | undefined)?.id === id)
+      if (index >= 0) providers.splice(index, 1, input)
+      else providers.push(input)
+    },
+    update: () => undefined,
+    remove: () => undefined,
+    models: { set: () => undefined, update: () => undefined, remove: () => undefined },
+  }
 
   const ctx: Record<string, unknown> = {
     app: { name: "opencode", version: options.version ?? "2.0.26", channel: "latest" },
@@ -190,22 +209,18 @@ export function createFakeHost(options: {
     },
     provider: {
       transform: async (callback: (editor: unknown) => void) => {
-        const editor = {
-          list: () => providers,
-          get: (providerID: string) =>
-            providers.find((entry) => (entry.provider as { id?: string } | undefined)?.id === providerID),
-          add: (input: Record<string, unknown>) => {
-            const id = (input.info as { id?: string } | undefined)?.id
-            const index = providers.findIndex((entry) => (entry.info as { id?: string } | undefined)?.id === id)
-            if (index >= 0) providers.splice(index, 1, input)
-            else providers.push(input)
+        providerTransforms.push(callback)
+        callback(providerEditor)
+        return {
+          dispose: async () => {
+            const index = providerTransforms.indexOf(callback)
+            if (index >= 0) providerTransforms.splice(index, 1)
           },
-          update: () => undefined,
-          remove: () => undefined,
-          models: { set: () => undefined, update: () => undefined, remove: () => undefined },
         }
-        callback(editor)
-        return { dispose: async () => undefined }
+      },
+      reload: async () => {
+        providerReloads += 1
+        for (const callback of [...providerTransforms]) callback(providerEditor)
       },
     },
   }
@@ -230,6 +245,7 @@ export function createFakeHost(options: {
     connectCalls,
     rpcRegistrations,
     rpcEvents,
+    providerReloads: () => providerReloads,
     storage,
     sessionHooks,
     pushEvent,
