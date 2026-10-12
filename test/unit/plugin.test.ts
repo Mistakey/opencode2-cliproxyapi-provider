@@ -266,6 +266,41 @@ describe("plugin setup", () => {
     expect(snapshot.fastEffectiveModels).toBe(1)
   })
 
+  test("a model without declared service tiers keeps the standard price even with Fast on", async () => {
+    mock = await startMockCpa({
+      models: [{ slug: "capable-model", service_tiers: ["priority"] }, { slug: "plain-model" }],
+    })
+    // models.dev publishes both a standard and a Fast rate for both models. Only
+    // the capable one actually receives priority, so only it may use the Fast rate.
+    const dualPrice = (input: number, output: number) => ({
+      cost: { input, output },
+      experimental: { modes: { fast: { cost: { input: input * 3, output: output * 3 } } } },
+    })
+    priceMock = await startMockCpa({
+      directory: {
+        status: 200,
+        body: { smoke: { models: { "capable-model": dualPrice(1, 2), "plain-model": dualPrice(1, 2) } } },
+      },
+    })
+    host = createFakeHost({
+      options: { baseURL: mock.url, apiKey: API_KEY, modelsDevURL: `${priceMock.url}/v1/models` },
+      storage: { "cliproxyapi.fast.cliproxyapi": true },
+    })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const provider = host.providers[0] as {
+      models: { id: string; settings?: Record<string, unknown>; cost: unknown[] }[]
+    }
+    const byId = Object.fromEntries(provider.models.map((model) => [model.id, model]))
+    // The capable model gets both the parameter and the matching Fast price.
+    expect(byId["capable-model"]?.settings).toEqual({ serviceTier: "priority" })
+    expect(byId["capable-model"]?.cost).toEqual([{ input: 3, output: 6, cache: { read: 0, write: 0 } }])
+    // The model that is not asked for priority must not be priced as if it were.
+    expect(byId["plain-model"]?.settings).toBeUndefined()
+    expect(byId["plain-model"]?.cost).toEqual([{ input: 1, output: 2, cache: { read: 0, write: 0 } }])
+  })
+
   test("setFast persists the preference, reports it and refuses a non-boolean", async () => {
     mock = await startMockCpa({ models: [{ slug: "capable-model", service_tiers: ["priority"] }] })
     host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
@@ -292,6 +327,50 @@ describe("plugin setup", () => {
     const invalid = await handlers.setFast({ enabled: "yes" })
     expect(invalid.ok).toBe(false)
     expect(invalid.message).toContain("boolean")
+  })
+
+  test("a failed Fast write is reported and leaves the old preference, models and applied state", async () => {
+    mock = await startMockCpa({ models: [{ slug: "capable-model", service_tiers: ["priority"] }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const modelsBefore = JSON.stringify((host.providers[0] as { models: unknown[] }).models)
+    const reloadsBefore = host.providerReloads()
+    const storage = (host.ctx as { storage: { set: (key: string, value: unknown) => Promise<void> } }).storage
+    storage.set = async () => {
+      throw new Error("storage is read-only")
+    }
+
+    const handlers = host.rpcRegistrations[0]?.handlers as {
+      setFast: (input: unknown) => Promise<{
+        ok: boolean
+        message?: string
+        snapshot: { fastEnabled: boolean; fastEffectiveModels: number }
+      }>
+    }
+    const failed = await handlers.setFast({ enabled: true })
+    expect(failed.ok).toBe(false)
+    expect(failed.message).toContain("read-only")
+    // The preference, the registered models and the applied state are untouched:
+    // no priority parameter was published for a preference that was never saved.
+    expect(failed.snapshot.fastEnabled).toBe(false)
+    expect(failed.snapshot.fastEffectiveModels).toBe(0)
+    expect(host.storage.get("cliproxyapi.fast.cliproxyapi")).toBeUndefined()
+    expect(JSON.stringify((host.providers[0] as { models: unknown[] }).models)).toBe(modelsBefore)
+    expect(host.providerReloads()).toBe(reloadsBefore)
+    const after = await status(host)
+    expect(after.fastEnabled).toBe(false)
+    expect(after.reloadRequired).toBe(false)
+
+    // A later write that succeeds persists and rebinds normally.
+    storage.set = async (key, value) => {
+      host!.storage.set(key, value)
+    }
+    const ok = await handlers.setFast({ enabled: true })
+    expect(ok.ok).toBe(true)
+    expect(ok.snapshot.fastEnabled).toBe(true)
+    expect(host.storage.get("cliproxyapi.fast.cliproxyapi")).toBe(true)
   })
 
   test("refuses a second Fast change while one is still being applied", async () => {

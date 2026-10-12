@@ -36,6 +36,10 @@ Delivered here:
   and dropped only after the retention window (seven days by default, measured
   from the first miss); requesting a retained model warns instead of promising
   the upstream still serves it
+- automatic recovery: after a failed read, or one that still retains stale
+  models, the plugin retries on a simple backoff (60s, then 1.5x up to a 300s
+  ceiling) until the directory is fresh again; a manual refresh, a connection
+  switch or unload cancels the pending retry
 - reasoning variants taken only from the declared `supported_reasoning_levels`,
   carried into requests through the v2 semantic `reasoningEffort` setting
 - a durable, provider-scoped **Fast** preference: off by default, toggled over
@@ -43,7 +47,9 @@ Delivered here:
   `serviceTier` setting only for models whose directory entry declares service
   tiers
 - standard, Fast and context-tiered **price estimates** matched from the public
-  models.dev catalog, with the reference alias table and no invented multiplier
+  models.dev catalog, with the reference alias table and no invented multiplier;
+  the Fast rate is used only for a model that also receives the priority
+  parameter
 - a cancellable pause gate and per-session duration/TPS/token/cache stats
 - credential handling through OpenCode's native key method and credential store
 - transport selection driven by the directory's `prefer_websockets` flag, with a
@@ -183,6 +189,12 @@ so a stale `service_tier` is never sent; a request already in flight is untouche
 That check reads an in-memory registry shared by the plugin instances of this
 process, so it never depends on the cache having been written or read
 successfully.
+
+A location that booted with no usable binding — no key configured, or the first
+directory read failed — has nothing compiled to replace, so the first successful
+connect or refresh is effective on the spot and is reported as `applied` without
+a pending reload. That is the host's own empty-boot behaviour, not a hot-update
+by the plugin; `scripts/host-first-connect.mjs` checks it on the real host.
 
 ## Transport, recovery and compaction
 
@@ -406,6 +418,13 @@ one credential's directory is never served to another.
 - The cache is a startup optimization. A failed or slow cache write never
   changes which directory or parameters are served, and no request-time decision
   reads the cache.
+- After a failed read, or a read that still retains stale models, the plugin
+  retries on its own on the reference plugin's simple schedule: a first delay of
+  60 seconds, growing 1.5x per attempt up to a five-minute ceiling. A fresh
+  directory clears the schedule; a manual refresh, a connection switch and
+  unload cancel a pending retry. Each retry is the same bounded directory
+  request, so an outer caller still limits the real GET; the plugin adds no
+  coordinator, no persistent polling and no snapshot machinery.
 
 ## Reasoning, Fast and prices
 
@@ -432,6 +451,10 @@ two apart: `fastEnabled` is the preference and `fastEffectiveModels` is how many
 models the runtime actually asks for priority, so "Fast on, but the directory
 declares no capable model" is a visible state rather than a silent no-op, and a
 pending change is reported as `reloadRequired` instead of an effective count.
+The preference is saved first: a storage write that fails is reported as a failed
+change and leaves the previous preference, the registered models and the applied
+state untouched, so a preference the next restart would not restore is never
+presented as effective.
 See [Applying a connection or directory change](#applying-a-connection-or-directory-change).
 
 **Prices** are estimates from the public models.dev catalog, matched with the
@@ -441,7 +464,9 @@ preference when several resellers publish the same model. When the remaining
 prices disagree and no provider is preferred, no cost is used at all.
 
 - the standard rate is used by default, and the published Fast rate
-  (`experimental.modes.fast.cost`) when Fast is on;
+  (`experimental.modes.fast.cost`) only for a model that also receives the
+  priority parameter — a model with no declared service tiers keeps the standard
+  rate even when Fast is on globally;
 - when models.dev publishes no Fast price, the standard rate is kept instead of
   inventing a multiplier;
 - context tiers (`tiers`, or the legacy `context_over_200k`) become the
@@ -484,6 +509,18 @@ disconnect.
 
 ```bash
 bun run smoke:connection
+```
+
+`scripts/host-first-connect.mjs` covers the boundary a location that booted
+without a usable binding has. With no key configured (and, in a second phase,
+with the first directory read failing), the first successful connect or refresh
+registers the models, the snapshot reports them as `applied` without a pending
+reload, and the runtime really dispatches them without a `location.reload()`.
+This is the host's empty-boot behaviour rather than a plugin hot-update, and it
+is why the reload boundary only applies once a binding has been compiled.
+
+```bash
+bun run smoke:first-connect
 ```
 
 `scripts/host-catalog.mjs` covers the cache and stale slice: a restart serving a

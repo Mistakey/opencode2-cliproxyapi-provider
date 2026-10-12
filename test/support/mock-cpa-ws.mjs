@@ -21,6 +21,16 @@ import { sseBody, textEvents, toolCallEvents } from "./mock-cpa.mjs"
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value)
 
+/**
+ * Match one CPA route exactly, keeping any reverse-proxy prefix. The `/v1`
+ * segment is required: a client that drops it (or invents another one) gets a
+ * 404 instead of being silently accepted, so an address-normalization
+ * regression is visible on the wire rather than passing as a green test.
+ */
+function isV1Route(pathname, route) {
+  return pathname === `/v1${route}` || pathname.endsWith(`/v1${route}`)
+}
+
 /** CPA's `shouldReplaceWebsocketTranscript`, minus the Codex-local summary special case. */
 export function inputIsFullTranscript(input) {
   if (!Array.isArray(input)) return false
@@ -123,7 +133,7 @@ export async function startMockCpaWs(options = {}) {
     port: 0,
     async fetch(req, srv) {
       const url = new URL(req.url)
-      if (req.method === "GET" && url.pathname.endsWith("/models")) {
+      if (req.method === "GET" && isV1Route(url.pathname, "/models")) {
         state.httpRequests.push({ method: "GET", path: url.pathname, authorization: req.headers.get("authorization") })
         if (state.directoryDown) return new Response("directory down", { status: 503 })
         if (options.requireKey && req.headers.get("authorization") !== `Bearer ${options.requireKey}`) {
@@ -131,7 +141,7 @@ export async function startMockCpaWs(options = {}) {
         }
         return Response.json({ models })
       }
-      if (req.method === "POST" && url.pathname.endsWith("/responses/compact")) {
+      if (req.method === "POST" && isV1Route(url.pathname, "/responses/compact")) {
         const raw = await req.text()
         state.httpRequests.push({ method: "POST", path: url.pathname, authorization: req.headers.get("authorization"), raw })
         state.compactions.push({ raw, json: safeJson(raw) })
@@ -149,7 +159,7 @@ export async function startMockCpaWs(options = {}) {
           usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
         })
       }
-      if (req.method === "POST" && url.pathname.endsWith("/responses")) {
+      if (req.method === "POST" && isV1Route(url.pathname, "/responses")) {
         const raw = await req.text()
         state.httpResponses += 1
         state.httpRequests.push({ method: "POST", path: url.pathname, authorization: req.headers.get("authorization"), raw })
@@ -172,7 +182,7 @@ export async function startMockCpaWs(options = {}) {
           headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
         })
       }
-      if (url.pathname.endsWith("/responses") && (req.headers.get("upgrade") ?? "").toLowerCase() === "websocket") {
+      if (isV1Route(url.pathname, "/responses") && (req.headers.get("upgrade") ?? "").toLowerCase() === "websocket") {
         state.upgrades += 1
         state.handshakes.push({ authorization: req.headers.get("authorization"), url: req.url })
         if (options.rejectUpgrade) return new Response("no websocket here", { status: 400 })

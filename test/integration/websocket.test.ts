@@ -134,6 +134,28 @@ function languageModel(url: string, modelID = "gpt-5.2-codex") {
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 
+describe("mock CPA WebSocket route contract", () => {
+  test("accepts the exact /v1 routes (with any reverse-proxy prefix) and refuses wrong paths", async () => {
+    mock = await startMockCpaWs({ responses: () => ({ text: "ws pong" }) })
+    const status = async (method: string, path: string, body?: string) =>
+      (await fetch(`${mock!.url}${path}`, { method, ...(body !== undefined ? { body } : {}) })).status
+
+    // The exact routes, with and without a reverse-proxy prefix.
+    expect(await status("GET", "/v1/models")).toBe(200)
+    expect(await status("GET", "/proxy/v1/models")).toBe(200)
+    expect(await status("POST", "/v1/responses", "{}")).toBe(200)
+    expect(await status("POST", "/proxy/v1/responses", "{}")).toBe(200)
+    expect(await status("POST", "/v1/responses/compact", "{}")).toBe(200)
+
+    // A dropped `/v1` segment or an invented one is a 404, not a silent accept.
+    expect(await status("GET", "/models")).toBe(404)
+    expect(await status("GET", "/wrong/models")).toBe(404)
+    expect(await status("POST", "/responses", "{}")).toBe(404)
+    expect(await status("POST", "/wrong/responses", "{}")).toBe(404)
+    expect(await status("POST", "/responses/compact", "{}")).toBe(404)
+  })
+})
+
 describe("native Responses WebSocket channel against a stateful mock CPA", () => {
   test("sends a full response.create frame for the first request", async () => {
     mock = await startMockCpaWs({ responses: () => ({ text: "ws pong" }) })

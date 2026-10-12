@@ -35,6 +35,7 @@
     "typecheck": "tsc --noEmit",
     "smoke:host": "bun scripts/host-smoke.mjs",
     "smoke:connection": "bun scripts/host-connection.mjs",
+    "smoke:first-connect": "bun scripts/host-first-connect.mjs",
     "smoke:catalog": "bun scripts/host-catalog.mjs",
     "smoke:transport": "bun scripts/host-transport.mjs",
     "smoke:pause": "bun scripts/host-pause.mjs",

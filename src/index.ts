@@ -21,7 +21,7 @@
 
 import { Model, Plugin, Provider } from "@opencode/plugin"
 import { DEFAULT_BASE_URL, AddressError, resolveEndpoints } from "./address"
-import { fastEffectiveCount, toModelInfo, type CatalogEntry } from "./catalog"
+import { fastEffectiveCount, supportsFastServiceTier, toModelInfo, type CatalogEntry } from "./catalog"
 import { connectionFingerprint, countStale, staleIds, type CatalogRecord } from "./catalog-cache"
 import { CatalogService, type CatalogIdentity } from "./catalog-service"
 import { createStorageCatalogStore, type CatalogStore, type StorageLike } from "./catalog-store"
@@ -389,7 +389,10 @@ async function setupConnection(ctx: Context) {
 
   const costFor = (entry: CatalogEntry): Model.Info["cost"] | undefined => {
     if (!costCatalog) return undefined
-    const cost = matchModelCost(entry.id, costCatalog, fastEnabled)
+    // The price follows the same effective-Fast judgement the model settings use:
+    // only a model the directory declares capable actually receives priority, so
+    // only that model may be priced at the published Fast rate.
+    const cost = matchModelCost(entry.id, costCatalog, fastEnabled && supportsFastServiceTier(entry))
     return cost ? toModelCost(cost) : undefined
   }
 
@@ -772,13 +775,20 @@ async function setupConnection(ctx: Context) {
       if (enabled !== fastEnabled) {
         fastChangeInProgress = true
         try {
-          fastEnabled = enabled
+          // Persist first: the in-memory preference and the registered models may
+          // only follow a write that succeeded, otherwise the snapshot would
+          // claim a preference the next restart would not restore.
           try {
             await writeFastPreference(ctx.storage, fastKey, enabled)
           } catch (error) {
             const detail = error instanceof Error ? error.message : String(error)
-            console.warn(`[${PLUGIN_ID}] could not persist the Fast preference: ${detail}`)
+            return {
+              ok: false,
+              message: `the Fast preference could not be saved: ${detail}`,
+              snapshot: state.read(),
+            }
           }
+          fastEnabled = enabled
           const applied = await service.rebind((record) => applyBinding(record))
           if (applied) {
             const { pending } = applied

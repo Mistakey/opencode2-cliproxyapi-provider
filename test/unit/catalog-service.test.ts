@@ -71,6 +71,12 @@ function makeHarness(input: {
   read: (input: CatalogReadInput) => Promise<VerifyResult>
   store?: CatalogStore
   staleTtlMs?: number
+  recovery?: {
+    baseDelayMs?: number
+    maxDelayMs?: number
+    setTimer?: (callback: () => void, delayMs: number) => unknown
+    clearTimer?: (handle: unknown) => void
+  }
 }): Harness {
   const commits: CatalogCommit[] = []
   const failures: CatalogFailure[] = []
@@ -86,8 +92,34 @@ function makeHarness(input: {
     },
     now: () => clock,
     ...(input.staleTtlMs !== undefined ? { staleTtlMs: input.staleTtlMs } : {}),
+    ...(input.recovery !== undefined ? { recovery: input.recovery } : {}),
   })
   return { service, commits, failures, setClock: (value) => (clock = value) }
+}
+
+/** A controllable timer so a test can observe and fire the recovery schedule. */
+function fakeTimers() {
+  const scheduled: { callback: () => void; delayMs: number; cancelled: boolean }[] = []
+  return {
+    setTimer: (callback: () => void, delayMs: number) => {
+      const entry = { callback, delayMs, cancelled: false }
+      scheduled.push(entry)
+      return entry
+    },
+    clearTimer: (handle: unknown) => {
+      if (handle) (handle as { cancelled: boolean }).cancelled = true
+    },
+    /** Delays of the timers still waiting to fire, in scheduling order. */
+    pending: () => scheduled.filter((entry) => !entry.cancelled).map((entry) => entry.delayMs),
+    /** Fire the oldest pending timer and let its read settle. */
+    async fire() {
+      const entry = scheduled.find((item) => !item.cancelled)
+      if (!entry) throw new Error("no pending recovery timer")
+      entry.cancelled = true
+      entry.callback()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    },
+  }
 }
 
 describe("CatalogService cache", () => {
@@ -322,5 +354,137 @@ describe("CatalogService controlled clock and applyRead", () => {
     expect(harness.service.isStale("b")).toBe(true)
     expect(harness.service.isStale("a")).toBe(false)
     expect(harness.service.isStale("missing")).toBe(false)
+  })
+})
+
+describe("CatalogService automatic recovery", () => {
+  test("a failed read retries on the official 60s to 300s backoff", async () => {
+    const timers = fakeTimers()
+    const harness = makeHarness({ read: async () => failure("unreachable", "down"), recovery: timers })
+    await harness.service.activate(identityA, 1)
+
+    // The very first boot read is not retried; a later background/manual read is.
+    expect((await harness.service.refresh({ generation: 1, mode: "initial" })).kind).toBe("unreachable")
+    expect(timers.pending()).toEqual([])
+
+    expect((await harness.service.refresh({ generation: 1, mode: "background" })).kind).toBe("unreachable")
+    expect(timers.pending()).toEqual([60_000])
+
+    const delays: number[] = [timers.pending()[0]!]
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await timers.fire()
+      delays.push(timers.pending().at(-1)!)
+    }
+    // 1.5x growth, capped at five minutes.
+    expect(delays).toEqual([60_000, 90_000, 135_000, 202_500, 300_000])
+    await timers.fire()
+    expect(timers.pending()).toEqual([300_000])
+  })
+
+  test("a successful fresh read clears the schedule and resets the backoff", async () => {
+    const timers = fakeTimers()
+    const results: VerifyResult[] = [
+      failure("unreachable"),
+      failure("unreachable"),
+      failure("unreachable"),
+      ok([entry("a")]),
+      failure("unreachable"),
+    ]
+    const harness = makeHarness({ read: async () => results.shift() ?? failure("unreachable"), recovery: timers })
+    await harness.service.activate(identityA, 1)
+
+    await harness.service.refresh({ generation: 1, mode: "background" })
+    await timers.fire()
+    await timers.fire()
+    expect(timers.pending()).toEqual([135_000])
+
+    // A fresh directory clears the timer and the attempt counter.
+    expect(await harness.service.refresh({ generation: 1, mode: "manual" })).toMatchObject({
+      committed: true,
+      kind: "ok",
+    })
+    expect(timers.pending()).toEqual([])
+
+    // The next failure starts again at 60s instead of continuing the old growth.
+    await harness.service.refresh({ generation: 1, mode: "background" })
+    expect(timers.pending()).toEqual([60_000])
+  })
+
+  test("retaining a stale model schedules recovery and a fresh directory clears it", async () => {
+    const timers = fakeTimers()
+    const results: VerifyResult[] = [ok([entry("a"), entry("b")]), ok([entry("a")]), ok([entry("a"), entry("b")])]
+    const harness = makeHarness({ read: async () => results.shift() ?? ok([]), recovery: timers })
+    await harness.service.activate(identityA, 1)
+
+    await harness.service.refresh({ generation: 1, mode: "initial" })
+    expect(timers.pending()).toEqual([])
+
+    // `b` is missing from this read but retained as stale: keep trying to recover it.
+    await harness.service.refresh({ generation: 1, mode: "manual" })
+    expect(harness.service.isStale("b")).toBe(true)
+    expect(timers.pending()).toEqual([60_000])
+
+    // `b` reappears, so there is nothing left to recover.
+    await harness.service.refresh({ generation: 1, mode: "manual" })
+    expect(harness.service.isStale("b")).toBe(false)
+    expect(timers.pending()).toEqual([])
+  })
+
+  test("a manual refresh cancels the pending recovery before it reads", async () => {
+    const timers = fakeTimers()
+    const queue = readerQueue()
+    const harness = makeHarness({ read: queue.read, recovery: timers })
+    await harness.service.activate(identityA, 1)
+
+    const failing = harness.service.refresh({ generation: 1, mode: "background" })
+    queue.pending.at(-1)!.resolve(failure("unreachable"))
+    await failing
+    expect(timers.pending()).toEqual([60_000])
+
+    // Starting a manual refresh supersedes the timer immediately.
+    const manual = harness.service.refresh({ generation: 1, mode: "manual" })
+    expect(timers.pending()).toEqual([])
+    queue.pending.at(-1)!.resolve(ok([entry("a")]))
+    expect(await manual).toMatchObject({ committed: true })
+    expect(timers.pending()).toEqual([])
+  })
+
+  test("a connection switch and dispose cancel a pending recovery", async () => {
+    const timers = fakeTimers()
+    const harness = makeHarness({ read: async () => failure("unreachable"), recovery: timers })
+    await harness.service.activate(identityA, 1)
+    await harness.service.refresh({ generation: 1, mode: "background" })
+    expect(timers.pending()).toEqual([60_000])
+
+    await harness.service.activate(identityB, 2)
+    expect(timers.pending()).toEqual([])
+
+    await harness.service.refresh({ generation: 2, mode: "background" })
+    expect(timers.pending()).toEqual([60_000])
+
+    harness.service.dispose()
+    expect(timers.pending()).toEqual([])
+  })
+
+  test("a fired recovery performs a background read through the active connection", async () => {
+    const timers = fakeTimers()
+    const results: VerifyResult[] = [failure("unreachable"), ok([entry("a")])]
+    let reads = 0
+    const harness = makeHarness({
+      read: async () => {
+        reads += 1
+        return results.shift() ?? ok([])
+      },
+      recovery: timers,
+    })
+    await harness.service.activate(identityA, 1)
+    await harness.service.refresh({ generation: 1, mode: "background" })
+    expect(reads).toBe(1)
+
+    await timers.fire()
+    expect(reads).toBe(2)
+    expect(harness.commits).toHaveLength(1)
+    expect(harness.commits[0]?.record.fingerprint).toBe(identityA.fingerprint)
+    expect(timers.pending()).toEqual([])
   })
 })

@@ -58,7 +58,23 @@ export interface CatalogServiceInput {
   readonly onFailure: (failure: CatalogFailure) => Promise<void> | void
   readonly now?: () => number
   readonly staleTtlMs?: number
+  /**
+   * Simple timed recovery after a stale or failed read, matching the official
+   * plugin: a 60s first delay, 1.5x growth and a 300s ceiling. The timer hooks
+   * are injectable so a test can control the clock.
+   */
+  readonly recovery?: {
+    readonly baseDelayMs?: number
+    readonly maxDelayMs?: number
+    readonly setTimer?: (callback: () => void, delayMs: number) => unknown
+    readonly clearTimer?: (handle: unknown) => void
+  }
 }
+
+/** First delay before a stale or failed directory read is retried. */
+export const DEFAULT_RECOVERY_DELAY_MS = 60_000
+/** Ceiling for the recovery delay. */
+export const MAX_RECOVERY_DELAY_MS = 300_000
 
 export interface RefreshInput {
   readonly generation: number
@@ -83,6 +99,10 @@ export class CatalogService {
   readonly #onFailure: CatalogServiceInput["onFailure"]
   readonly #now: () => number
   readonly #staleTtlMs: number | undefined
+  readonly #recoveryBaseMs: number
+  readonly #recoveryMaxMs: number
+  readonly #setTimer: (callback: () => void, delayMs: number) => unknown
+  readonly #clearTimer: (handle: unknown) => void
 
   #identity: CatalogIdentity | undefined
   #generation = 0
@@ -90,6 +110,8 @@ export class CatalogService {
   #token = 0
   #controller: AbortController | undefined
   #disposed = false
+  #recoveryTimer: unknown
+  #recoveryAttempt = 0
   /** Commits run in issue order; the chain is the only serialization needed. */
   #commitChain: Promise<unknown> = Promise.resolve()
 
@@ -100,6 +122,13 @@ export class CatalogService {
     this.#onFailure = input.onFailure
     this.#now = input.now ?? Date.now
     this.#staleTtlMs = input.staleTtlMs
+    this.#recoveryBaseMs = input.recovery?.baseDelayMs ?? DEFAULT_RECOVERY_DELAY_MS
+    this.#recoveryMaxMs = input.recovery?.maxDelayMs ?? MAX_RECOVERY_DELAY_MS
+    this.#setTimer =
+      input.recovery?.setTimer ?? ((callback, delayMs) => setTimeout(callback, delayMs))
+    this.#clearTimer =
+      input.recovery?.clearTimer ??
+      ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>))
   }
 
   get ready(): boolean {
@@ -122,6 +151,8 @@ export class CatalogService {
    */
   async activate(identity: CatalogIdentity, generation: number): Promise<CatalogRecord | undefined> {
     this.#abortInflight()
+    // A different connection has no schedule to keep.
+    this.#clearRecovery()
     this.#identity = identity
     this.#generation = generation
     this.#record = undefined
@@ -147,6 +178,10 @@ export class CatalogService {
     if (this.#disposed || !identity || input.generation !== this.#generation) {
       return { ok: false, kind: "stale", committed: false }
     }
+
+    // A new read supersedes any pending recovery; the outcome below decides
+    // whether another one is scheduled.
+    this.#clearRecoveryTimer()
 
     const token = this.#token + 1
     this.#token = token
@@ -176,6 +211,9 @@ export class CatalogService {
         message: result.message,
         hadCatalog: this.#record !== undefined,
       })
+      // A failed read is retried on the simple backoff. The very first boot read
+      // (mode "initial") is not retried, matching the reference plugin.
+      if (input.mode !== "initial") this.#scheduleRecovery()
       return { ok: false, kind: result.kind, message: result.message, committed: false }
     }
 
@@ -248,7 +286,45 @@ export class CatalogService {
     // queued newer commit writes the cache and publishes after this one.
     if (!this.#isCurrent(generation, identity, token)) return undefined
     await this.#onCommit({ generation, record, fromCache: false, kind })
+    // A directory that still retains missing models keeps trying to recover
+    // them; a fully fresh directory clears the schedule.
+    if (record.models.some((state) => state.stale)) this.#scheduleRecovery()
+    else this.#clearRecovery()
     return record
+  }
+
+  /**
+   * Arrange one recovery read after the official delay. The timer only clears
+   * itself and reads through the same generation guard, so a switch or unload
+   * cannot let an old schedule act.
+   */
+  #scheduleRecovery(): void {
+    if (this.#disposed || !this.#identity) return
+    this.#clearRecoveryTimer()
+    const delay = Math.min(this.#recoveryBaseMs * 1.5 ** this.#recoveryAttempt, this.#recoveryMaxMs)
+    this.#recoveryAttempt += 1
+    const generation = this.#generation
+    const handle = this.#setTimer(() => {
+      this.#recoveryTimer = undefined
+      if (this.#disposed || this.#generation !== generation) return
+      void this.refresh({ generation, mode: "background" }).catch(() => undefined)
+    }, delay)
+    // Never hold the host process open for a pending retry.
+    ;(handle as { unref?: () => void } | undefined)?.unref?.()
+    this.#recoveryTimer = handle
+  }
+
+  #clearRecoveryTimer(): void {
+    if (this.#recoveryTimer !== undefined) {
+      this.#clearTimer(this.#recoveryTimer)
+      this.#recoveryTimer = undefined
+    }
+  }
+
+  /** A successful fresh read clears the schedule and the backoff counter. */
+  #clearRecovery(): void {
+    this.#clearRecoveryTimer()
+    this.#recoveryAttempt = 0
   }
 
   /** Whether this read is still the active connection's latest issued one. */
@@ -280,6 +356,7 @@ export class CatalogService {
   dispose(): void {
     this.#disposed = true
     this.#abortInflight()
+    this.#clearRecovery()
     this.#identity = undefined
     this.#record = undefined
   }
