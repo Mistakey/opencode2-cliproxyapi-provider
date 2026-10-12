@@ -212,8 +212,12 @@ export class CatalogService {
         hadCatalog: this.#record !== undefined,
       })
       // A failed read is retried on the simple backoff. The very first boot read
-      // (mode "initial") is not retried, matching the reference plugin.
-      if (input.mode !== "initial") this.#scheduleRecovery()
+      // (mode "initial") is not retried, matching the reference plugin. The
+      // callback may await a host publish, so re-check the generation first: a
+      // connection switch during it must not schedule a retry for the new one.
+      if (input.mode !== "initial" && this.#isCurrent(input.generation, identity, token)) {
+        this.#scheduleRecovery()
+      }
       return { ok: false, kind: result.kind, message: result.message, committed: false }
     }
 
@@ -287,9 +291,14 @@ export class CatalogService {
     if (!this.#isCurrent(generation, identity, token)) return undefined
     await this.#onCommit({ generation, record, fromCache: false, kind })
     // A directory that still retains missing models keeps trying to recover
-    // them; a fully fresh directory clears the schedule.
-    if (record.models.some((state) => state.stale)) this.#scheduleRecovery()
-    else this.#clearRecovery()
+    // them; a fully fresh directory clears the schedule. The publish callback
+    // may await a host rebind, so re-check the generation first: a connection
+    // switch during it must not let this older commit touch the new
+    // connection's recovery state.
+    if (this.#isCurrent(generation, identity, token)) {
+      if (record.models.some((state) => state.stale)) this.#scheduleRecovery()
+      else this.#clearRecovery()
+    }
     return record
   }
 

@@ -77,6 +77,9 @@ function makeHarness(input: {
     setTimer?: (callback: () => void, delayMs: number) => unknown
     clearTimer?: (handle: unknown) => void
   }
+  /** Awaited after the commit/failure is recorded, so a test can hold the callback. */
+  afterCommit?: () => Promise<void> | void
+  afterFailure?: () => Promise<void> | void
 }): Harness {
   const commits: CatalogCommit[] = []
   const failures: CatalogFailure[] = []
@@ -84,17 +87,26 @@ function makeHarness(input: {
   const service = new CatalogService({
     store: input.store ?? createMemoryCatalogStore(),
     read: input.read,
-    onCommit: (commit) => {
+    onCommit: async (commit) => {
       commits.push(commit)
+      await input.afterCommit?.()
     },
-    onFailure: (failure) => {
+    onFailure: async (failure) => {
       failures.push(failure)
+      await input.afterFailure?.()
     },
     now: () => clock,
     ...(input.staleTtlMs !== undefined ? { staleTtlMs: input.staleTtlMs } : {}),
     ...(input.recovery !== undefined ? { recovery: input.recovery } : {}),
   })
   return { service, commits, failures, setClock: (value) => (clock = value) }
+}
+
+/** A promise a test resolves by hand, to hold an awaited callback open. */
+function deferred() {
+  let done!: () => void
+  const promise = new Promise<void>((resolve) => (done = resolve))
+  return { promise, done }
 }
 
 /** A controllable timer so a test can observe and fire the recovery schedule. */
@@ -485,6 +497,67 @@ describe("CatalogService automatic recovery", () => {
     expect(reads).toBe(2)
     expect(harness.commits).toHaveLength(1)
     expect(harness.commits[0]?.record.fingerprint).toBe(identityA.fingerprint)
+    expect(timers.pending()).toEqual([])
+  })
+
+  test("a connection switch during a commit callback does not schedule recovery for the new connection", async () => {
+    const timers = fakeTimers()
+    const entered = deferred()
+    const release = deferred()
+    let hold = false
+    const results: VerifyResult[] = [ok([entry("a"), entry("b")]), ok([entry("a")])]
+    const harness = makeHarness({
+      read: async () => results.shift() ?? ok([]),
+      recovery: timers,
+      afterCommit: async () => {
+        if (!hold) return
+        hold = false
+        entered.done()
+        await release.promise
+      },
+    })
+    await harness.service.activate(identityA, 1)
+    await harness.service.refresh({ generation: 1, mode: "initial" })
+    expect(timers.pending()).toEqual([])
+
+    // This read retains `b` as stale, so it would schedule recovery. The commit
+    // callback is held open while the connection switches to B.
+    hold = true
+    const stale = harness.service.refresh({ generation: 1, mode: "manual" })
+    await entered.promise
+    await harness.service.activate(identityB, 2)
+    release.done()
+    await stale
+
+    // The superseded commit must not schedule a retry for connection B.
+    expect(timers.pending()).toEqual([])
+  })
+
+  test("a connection switch during a failure callback does not schedule recovery for the new connection", async () => {
+    const timers = fakeTimers()
+    const entered = deferred()
+    const release = deferred()
+    let hold = false
+    const harness = makeHarness({
+      read: async () => failure("unreachable", "down"),
+      recovery: timers,
+      afterFailure: async () => {
+        if (!hold) return
+        hold = false
+        entered.done()
+        await release.promise
+      },
+    })
+    await harness.service.activate(identityA, 1)
+
+    hold = true
+    const failing = harness.service.refresh({ generation: 1, mode: "background" })
+    await entered.promise
+    await harness.service.activate(identityB, 2)
+    release.done()
+    await failing
+
+    // The superseded failure must not schedule a retry for connection B.
     expect(timers.pending()).toEqual([])
   })
 })

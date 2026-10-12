@@ -21,16 +21,6 @@ import { sseBody, textEvents, toolCallEvents } from "./mock-cpa.mjs"
 
 const isRecord = (value) => typeof value === "object" && value !== null && !Array.isArray(value)
 
-/**
- * Match one CPA route exactly, keeping any reverse-proxy prefix. The `/v1`
- * segment is required: a client that drops it (or invents another one) gets a
- * 404 instead of being silently accepted, so an address-normalization
- * regression is visible on the wire rather than passing as a green test.
- */
-function isV1Route(pathname, route) {
-  return pathname === `/v1${route}` || pathname.endsWith(`/v1${route}`)
-}
-
 /** CPA's `shouldReplaceWebsocketTranscript`, minus the Codex-local summary special case. */
 export function inputIsFullTranscript(input) {
   if (!Array.isArray(input)) return false
@@ -127,13 +117,22 @@ export async function startMockCpaWs(options = {}) {
   }
   const models = options.models ?? [{ slug: "probe-model", display_name: "Probe Model", prefer_websockets: true }]
   const replyFor = options.responses ?? (() => ({ text: "ws pong" }))
+  // Mirror the HTTP mock: an explicit base path (a reverse-proxy subpath),
+  // defaulting to the root. Routes are matched on the exact path, so a client
+  // that drops the `/v1` segment, invents another prefix or doubles `/v1` gets a
+  // 404 instead of being silently accepted.
+  const rawBasePath = typeof options.basePath === "string" ? options.basePath.trim().replace(/\/+$/, "") : ""
+  const basePath = rawBasePath === "" || rawBasePath.startsWith("/") ? rawBasePath : `/${rawBasePath}`
+  const modelsPath = `${basePath}/v1/models`
+  const responsesPath = `${basePath}/v1/responses`
+  const compactPath = `${basePath}/v1/responses/compact`
 
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(req, srv) {
       const url = new URL(req.url)
-      if (req.method === "GET" && isV1Route(url.pathname, "/models")) {
+      if (req.method === "GET" && url.pathname === modelsPath) {
         state.httpRequests.push({ method: "GET", path: url.pathname, authorization: req.headers.get("authorization") })
         if (state.directoryDown) return new Response("directory down", { status: 503 })
         if (options.requireKey && req.headers.get("authorization") !== `Bearer ${options.requireKey}`) {
@@ -141,7 +140,7 @@ export async function startMockCpaWs(options = {}) {
         }
         return Response.json({ models })
       }
-      if (req.method === "POST" && isV1Route(url.pathname, "/responses/compact")) {
+      if (req.method === "POST" && url.pathname === compactPath) {
         const raw = await req.text()
         state.httpRequests.push({ method: "POST", path: url.pathname, authorization: req.headers.get("authorization"), raw })
         state.compactions.push({ raw, json: safeJson(raw) })
@@ -159,7 +158,7 @@ export async function startMockCpaWs(options = {}) {
           usage: { input_tokens: 5, output_tokens: 2, total_tokens: 7 },
         })
       }
-      if (req.method === "POST" && isV1Route(url.pathname, "/responses")) {
+      if (req.method === "POST" && url.pathname === responsesPath) {
         const raw = await req.text()
         state.httpResponses += 1
         state.httpRequests.push({ method: "POST", path: url.pathname, authorization: req.headers.get("authorization"), raw })
@@ -182,7 +181,7 @@ export async function startMockCpaWs(options = {}) {
           headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
         })
       }
-      if (isV1Route(url.pathname, "/responses") && (req.headers.get("upgrade") ?? "").toLowerCase() === "websocket") {
+      if (url.pathname === responsesPath && (req.headers.get("upgrade") ?? "").toLowerCase() === "websocket") {
         state.upgrades += 1
         state.handshakes.push({ authorization: req.headers.get("authorization"), url: req.url })
         if (options.rejectUpgrade) return new Response("no websocket here", { status: 400 })
@@ -269,7 +268,7 @@ export async function startMockCpaWs(options = {}) {
   })
 
   return {
-    url: `http://127.0.0.1:${server.port}`,
+    url: `http://127.0.0.1:${server.port}${basePath}`,
     state,
     close: () => server.stop(true),
   }

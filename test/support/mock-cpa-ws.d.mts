@@ -61,6 +61,7 @@ export declare function normalizeRequest(
 
 export declare function startMockCpaWs(options?: {
   models?: readonly Record<string, unknown>[]
+  basePath?: string
   requireKey?: string
   rejectUpgrade?: boolean
   responses?: (

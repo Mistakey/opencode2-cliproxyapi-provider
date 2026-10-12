@@ -134,25 +134,93 @@ function languageModel(url: string, modelID = "gpt-5.2-codex") {
 
 const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms))
 
+/** True when a WebSocket handshake at `url` completes. */
+function wsOpens(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout>
+    const done = (value: boolean) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(value)
+    }
+    const socket = new WebSocket(url)
+    socket.addEventListener("open", () => {
+      socket.close()
+      done(true)
+    })
+    socket.addEventListener("error", () => done(false))
+    timer = setTimeout(() => {
+      try {
+        socket.close()
+      } catch {
+        // The socket may already be closed.
+      }
+      done(false)
+    }, 2000)
+  })
+}
+
 describe("mock CPA WebSocket route contract", () => {
-  test("accepts the exact /v1 routes (with any reverse-proxy prefix) and refuses wrong paths", async () => {
+  test("serves only the exact root /v1 routes and refuses extra prefixes", async () => {
     mock = await startMockCpaWs({ responses: () => ({ text: "ws pong" }) })
     const status = async (method: string, path: string, body?: string) =>
       (await fetch(`${mock!.url}${path}`, { method, ...(body !== undefined ? { body } : {}) })).status
 
-    // The exact routes, with and without a reverse-proxy prefix.
     expect(await status("GET", "/v1/models")).toBe(200)
-    expect(await status("GET", "/proxy/v1/models")).toBe(200)
     expect(await status("POST", "/v1/responses", "{}")).toBe(200)
-    expect(await status("POST", "/proxy/v1/responses", "{}")).toBe(200)
     expect(await status("POST", "/v1/responses/compact", "{}")).toBe(200)
 
-    // A dropped `/v1` segment or an invented one is a 404, not a silent accept.
-    expect(await status("GET", "/models")).toBe(404)
-    expect(await status("GET", "/wrong/models")).toBe(404)
-    expect(await status("POST", "/responses", "{}")).toBe(404)
-    expect(await status("POST", "/wrong/responses", "{}")).toBe(404)
-    expect(await status("POST", "/responses/compact", "{}")).toBe(404)
+    // A dropped `/v1`, an extra prefix or a doubled `/v1` is a 404.
+    for (const path of ["/models", "/wrong/models", "/wrong/v1/models", "/v1/v1/models"]) {
+      expect(await status("GET", path)).toBe(404)
+    }
+    for (const path of [
+      "/responses",
+      "/wrong/responses",
+      "/wrong/v1/responses",
+      "/v1/v1/responses",
+      "/responses/compact",
+    ]) {
+      expect(await status("POST", path, "{}")).toBe(404)
+    }
+
+    // The WebSocket upgrade follows the same rule: the wrong path never reaches
+    // the upgrade branch.
+    const before = mock.state.upgrades
+    expect(await wsOpens(`ws://${new URL(mock.url).host}/wrong/v1/responses`)).toBe(false)
+    expect(mock.state.upgrades).toBe(before)
+    expect(await wsOpens(`ws://${new URL(mock.url).host}/v1/responses`)).toBe(true)
+    expect(mock.state.upgrades).toBe(before + 1)
+  })
+
+  test("serves a configured reverse-proxy base path and refuses the root or another prefix", async () => {
+    mock = await startMockCpaWs({ basePath: "/cpa", responses: () => ({ text: "ws pong" }) })
+    expect(new URL(mock.url).pathname).toBe("/cpa")
+    const origin = new URL(mock.url).origin
+    const status = async (method: string, path: string, body?: string) =>
+      (await fetch(`${origin}${path}`, { method, ...(body !== undefined ? { body } : {}) })).status
+
+    expect(await status("GET", "/cpa/v1/models")).toBe(200)
+    expect(await status("POST", "/cpa/v1/responses", "{}")).toBe(200)
+    expect(await status("POST", "/cpa/v1/responses/compact", "{}")).toBe(200)
+
+    // The root `/v1` routes and any other prefix are not served.
+    for (const path of ["/v1/models", "/other/v1/models", "/cpa/v1/v1/models", "/cpa/models"]) {
+      expect(await status("GET", path)).toBe(404)
+    }
+    for (const path of ["/v1/responses", "/other/v1/responses", "/cpa/v1/v1/responses"]) {
+      expect(await status("POST", path, "{}")).toBe(404)
+    }
+
+    // The WebSocket upgrade is bound to the same base path.
+    const before = mock.state.upgrades
+    expect(await wsOpens(`ws://${new URL(mock.url).host}/v1/responses`)).toBe(false)
+    expect(await wsOpens(`ws://${new URL(mock.url).host}/other/v1/responses`)).toBe(false)
+    expect(mock.state.upgrades).toBe(before)
+    expect(await wsOpens(`ws://${new URL(mock.url).host}/cpa/v1/responses`)).toBe(true)
+    expect(mock.state.upgrades).toBe(before + 1)
   })
 })
 
