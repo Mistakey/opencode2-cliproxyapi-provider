@@ -1,11 +1,11 @@
 // Permanent regressions for the fresh-review residuals fixed in this slice.
 //
 // Each test names the positive behaviour the review proved missing: the connect
-// transaction is ordered around the native save (F02), the storage and publish
-// boundary owns its record after every await (F04), a withdrawn service tier is
-// never dispatched before the location reloads (F03), an authoritative refresh
-// applies a pending snapshot (F07) and drops the previous generation's stats
-// (F05), and a live turn excludes an open pause wait (F06).
+// transaction is ordered around the native save (F02), an older directory commit
+// cannot outlive a newer one and needs no repair write (F04), a withdrawn service
+// tier is never dispatched before the location reloads (F03), an authoritative
+// refresh applies a pending snapshot (F07) and drops the previous generation's
+// stats (F05), and a live turn excludes an open pause wait (F06).
 
 import { describe, expect, test } from "bun:test"
 import { CatalogService } from "../../src/catalog-service"
@@ -154,7 +154,7 @@ describe("F02 the native save is the connect transaction's commit point", () => 
   })
 })
 
-describe("F04 storage and publish ownership spans every await", () => {
+describe("F04 an older commit cannot outlive a newer one", () => {
   test("a newer issued read invalidates an older save before that read completes", async () => {
     const entered = gate()
     const saveRelease = gate()
@@ -197,74 +197,43 @@ describe("F04 storage and publish ownership spans every await", () => {
     service.dispose()
   })
 
-  test("an older onCommit that finishes late republishes the newest record last", async () => {
-    const entered = gate()
-    const release = gate()
+  test("a newer read issued during the older cache write leaves the newest record served and cached", async () => {
+    const saveEntered = gate()
+    const saveRelease = gate()
     const store = createMemoryCatalogStore()
     const commits: string[] = []
-    let reads = 0
-    const service = new CatalogService({
-      store,
-      read: async () => result(++reads === 1 ? "old" : "new"),
-      onCommit: async (commit) => {
-        const id = commit.record.models[0]!.entry.id
-        if (id === "old") {
-          entered.done()
-          await release.promise
-        }
-        commits.push(id)
-      },
-      onFailure: () => undefined,
-    })
-    await service.activate(identity, 1)
-    const old = service.refresh({ generation: 1, mode: "manual" })
-    await entered.promise
-    await service.refresh({ generation: 1, mode: "manual" })
-    release.done()
-    await old
-    expect(commits.at(-1)).toBe("new")
-    service.dispose()
-  })
-
-  test("three overlapping storage writes leave the newest record in the cache", async () => {
-    const oldEntered = gate()
-    const oldRelease = gate()
-    const repairEntered = gate()
-    const repairRelease = gate()
-    const store = createMemoryCatalogStore()
     let reads = 0
     let saves = 0
     const service = new CatalogService({
       store: {
         load: store.load,
         save: async (record) => {
-          const n = ++saves
-          if (n === 1) {
-            oldEntered.done()
-            await oldRelease.promise
-          }
-          if (n === 3) {
-            repairEntered.done()
-            await repairRelease.promise
+          if (++saves === 1) {
+            saveEntered.done()
+            await saveRelease.promise
           }
           await store.save(record)
         },
       },
-      read: async () => result(["old", "new", "latest"][reads++]!),
-      onCommit: () => undefined,
+      read: async () => result(++reads === 1 ? "old" : "new"),
+      onCommit: (commit) => {
+        commits.push(commit.record.models[0]!.entry.id)
+      },
       onFailure: () => undefined,
     })
     await service.activate(identity, 1)
     const old = service.refresh({ generation: 1, mode: "manual" })
-    await oldEntered.promise
-    await service.refresh({ generation: 1, mode: "manual" })
-    oldRelease.done()
-    await repairEntered.promise
-    await service.refresh({ generation: 1, mode: "manual" })
-    repairRelease.done()
-    await old
-    expect(service.current()?.models[0]?.entry.id).toBe("latest")
-    expect((await store.load("fake"))?.models[0]?.entry.id).toBe("latest")
+    await saveEntered.promise
+    // The newer read is issued while the older cache write is still pending.
+    const newer = service.refresh({ generation: 1, mode: "manual" })
+    saveRelease.done()
+    expect((await old).committed).toBe(false)
+    expect((await newer).committed).toBe(true)
+    // The superseded commit published nothing; the cache ends on the newest one
+    // because commits are applied in issue order, with no repair write.
+    expect(commits).toEqual(["new"])
+    expect(service.current()?.models[0]?.entry.id).toBe("new")
+    expect((await store.load("fake"))?.models[0]?.entry.id).toBe("new")
     service.dispose()
   })
 
@@ -293,9 +262,12 @@ describe("F04 storage and publish ownership spans every await", () => {
     const old = service.refresh({ generation: 1, mode: "manual" })
     await entered.promise
     await service.activate({ ...identity }, 2)
-    await service.refresh({ generation: 2, mode: "manual" })
+    // Issue the new generation's read while the older save is still pending; it
+    // is queued behind that commit, so release it before awaiting the result.
+    const newer = service.refresh({ generation: 2, mode: "manual" })
     release.done()
     await old
+    await newer
     expect((await store.load("fake"))?.models[0]?.entry.id).toBe("new")
     service.dispose()
   })

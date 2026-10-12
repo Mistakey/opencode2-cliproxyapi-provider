@@ -2,11 +2,16 @@
  * Directory refresh engine for one connection.
  *
  * The service owns the active connection identity, the cached directory and a
- * request token. Every asynchronous read is checked against the token and the
+ * read token. Every asynchronous read is checked against the token and the
  * connection generation before it may commit, so a slow refresh from a
  * connection the user already replaced (or a plugin that was unloaded) can
- * never overwrite the newer state, and two overlapping refreshes settle in
- * request order rather than completion order.
+ * never overwrite the newer state, and a superseded read is dropped.
+ *
+ * Commits are applied one at a time in the order they were issued: the record,
+ * its best-effort cache write and the publish callback are a single ordered
+ * step. That ordering is what removes the need for a repair write or a
+ * republish loop — a newer commit simply runs after the older one and leaves
+ * the newest state in the cache and in the runtime.
  */
 
 import type { CatalogEntry } from "./catalog"
@@ -36,13 +41,6 @@ export interface CatalogCommit {
   readonly fromCache: boolean
   /** Outcome of the read that produced this record. */
   readonly kind: VerifyKind
-  /**
-   * Whether this commit still owns the served record, the cache and the
-   * provider publication. A commit that lost ownership (a newer read, a
-   * connection change, or an unload) must not publish its record, and the
-   * callback checks this after every await.
-   */
-  readonly owns: () => boolean
 }
 
 export interface CatalogFailure {
@@ -92,10 +90,8 @@ export class CatalogService {
   #token = 0
   #controller: AbortController | undefined
   #disposed = false
-  /** Order of issued commits; the newest one owns the served record and cache. */
-  #commitSeq = 0
-  /** Read outcome of the served record, reused when a repair republishes it. */
-  #recordKind: VerifyKind = "ok"
+  /** Commits run in issue order; the chain is the only serialization needed. */
+  #commitChain: Promise<unknown> = Promise.resolve()
 
   constructor(input: CatalogServiceInput) {
     this.#store = input.store
@@ -170,7 +166,7 @@ export class CatalogService {
       }
     }
 
-    if (this.#disposed || token !== this.#token || input.generation !== this.#generation || this.#identity !== identity) {
+    if (!this.#isCurrent(input.generation, identity, token)) {
       return { ok: result.ok, kind: "cancelled", committed: false }
     }
     if (!result.ok) {
@@ -183,7 +179,9 @@ export class CatalogService {
       return { ok: false, kind: result.kind, message: result.message, committed: false }
     }
 
-    const record = await this.#commit(input.generation, result.entries, result.kind, token)
+    const record = await this.#enqueue(() =>
+      this.#commit(input.generation, identity, token, result.entries, result.kind),
+    )
     return record
       ? { ok: true, kind: result.kind, record, committed: true }
       : { ok: false, kind: "cancelled", committed: false }
@@ -198,24 +196,39 @@ export class CatalogService {
     entries: readonly CatalogEntry[]
     kind?: VerifyKind
   }): Promise<CatalogRecord | undefined> {
-    if (this.#disposed || !this.#identity || input.generation !== this.#generation) return undefined
+    const identity = this.#identity
+    if (this.#disposed || !identity || input.generation !== this.#generation) return undefined
     const kind = input.kind ?? (input.entries.length === 0 ? "empty" : "ok")
-    return this.#commit(input.generation, input.entries, kind, this.#token)
+    const token = this.#token
+    return this.#enqueue(() => this.#commit(input.generation, identity, token, input.entries, kind))
+  }
+
+  /**
+   * Re-derive the provider binding from the current directory under the same
+   * ordered path as a refresh, so a Fast toggle cannot apply an older record
+   * after a newer directory already committed.
+   */
+  async rebind<T>(task: (record: CatalogRecord) => Promise<T>): Promise<T | undefined> {
+    const identity = this.#identity
+    if (this.#disposed || !identity) return undefined
+    const generation = this.#generation
+    return this.#enqueue(async () => {
+      const record = this.#record
+      if (this.#disposed || !record || this.#generation !== generation || this.#identity !== identity) {
+        return undefined
+      }
+      return task(record)
+    })
   }
 
   async #commit(
     generation: number,
+    identity: CatalogIdentity,
+    token: number,
     entries: readonly CatalogEntry[],
     kind: VerifyKind,
-    token: number,
   ): Promise<CatalogRecord | undefined> {
-    const identity = this.#identity
-    if (!identity) return undefined
-    if (this.#disposed || this.#generation !== generation) return undefined
-    // The commit order decides ownership: a refresh issued later always has a
-    // higher sequence, so an earlier commit whose storage write is still pending
-    // may not publish, and must leave the newer record in the cache.
-    const seq = ++this.#commitSeq
+    if (!this.#isCurrent(generation, identity, token)) return undefined
     const record = mergeCatalog({
       previous: this.#record,
       entries,
@@ -226,85 +239,36 @@ export class CatalogService {
       ...(this.#staleTtlMs !== undefined ? { staleTtlMs: this.#staleTtlMs } : {}),
     })
     this.#record = record
-    this.#recordKind = kind
-    await this.#persist(record, seq, generation, identity)
-    if (!this.#owns(seq, generation, identity, token)) return undefined
-    await this.#onCommit({
-      generation,
-      record,
-      fromCache: false,
-      kind,
-      owns: () => this.#owns(seq, generation, identity, token),
-    })
-    // The callback's own awaits may have outlived this commit. A newer commit
-    // owns the record, the cache and the published state; this older callback
-    // may still have written after it, so the newest record is published again
-    // to leave the runtime on the newest one.
-    if (this.#owns(seq, generation, identity, token)) return record
-    await this.#republishNewest()
-    return undefined
-  }
-
-  /**
-   * Whether a commit is still the newest one for the active connection and the
-   * latest issued read. A `token` of `undefined` ignores the read token, for a
-   * repair write that only cares about commit order.
-   */
-  #owns(seq: number, generation: number, identity: CatalogIdentity, token?: number): boolean {
-    return (
-      !this.#disposed &&
-      this.#generation === generation &&
-      this.#identity === identity &&
-      this.#commitSeq === seq &&
-      (token === undefined || token === this.#token)
-    )
-  }
-
-  /**
-   * Publish the newest served record again after an older callback finished
-   * late, so the last publication the runtime sees is always the newest commit.
-   */
-  async #republishNewest(): Promise<void> {
-    for (;;) {
-      if (this.#disposed) return
-      const identity = this.#identity
-      const record = this.#record
-      if (!identity || !record) return
-      const seq = this.#commitSeq
-      const generation = this.#generation
-      await this.#onCommit({
-        generation,
-        record,
-        fromCache: false,
-        kind: this.#recordKind,
-        owns: () => this.#owns(seq, generation, identity),
-      })
-      if (this.#disposed || this.#commitSeq === seq) return
-    }
-  }
-
-  /**
-   * Persist one record and keep the cache ordered: if a newer commit (or a new
-   * connection) landed while this write was pending, the newest record is
-   * written again so an older storage write can never be the final one.
-   */
-  async #persist(
-    record: CatalogRecord,
-    seq: number,
-    generation: number,
-    identity: CatalogIdentity,
-  ): Promise<void> {
     try {
       await this.#store.save(record)
     } catch {
       // Losing the cache write is not worth failing a good live directory.
     }
-    if (this.#disposed) return
-    if (this.#owns(seq, generation, identity)) return
-    const newest = this.#record
-    const newestIdentity = this.#identity
-    if (!newest || newest === record || !newestIdentity) return
-    await this.#persist(newest, this.#commitSeq, this.#generation, newestIdentity)
+    // A newer read issued during the cache write owns the served record; the
+    // queued newer commit writes the cache and publishes after this one.
+    if (!this.#isCurrent(generation, identity, token)) return undefined
+    await this.#onCommit({ generation, record, fromCache: false, kind })
+    return record
+  }
+
+  /** Whether this read is still the active connection's latest issued one. */
+  #isCurrent(generation: number, identity: CatalogIdentity, token: number): boolean {
+    return (
+      !this.#disposed &&
+      this.#generation === generation &&
+      this.#identity === identity &&
+      token === this.#token
+    )
+  }
+
+  /** Run one commit at a time, in the order the commits were issued. */
+  #enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.#commitChain.then(task, task)
+    this.#commitChain = run.then(
+      () => undefined,
+      () => undefined,
+    )
+    return run
   }
 
   #abortInflight(): void {
