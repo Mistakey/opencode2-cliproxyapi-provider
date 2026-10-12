@@ -95,6 +95,65 @@ describe("F02 a failed connect leaves the active connection untouched", () => {
   })
 })
 
+describe("F03 two-phase apply is machine-readable", () => {
+  let host: FakeHost | undefined
+  let mock: Awaited<ReturnType<typeof startMockCpa>> | undefined
+
+  afterEach(async () => {
+    host?.restoreConsole()
+    host = undefined
+    await mock?.close()
+    mock = undefined
+  })
+
+  type Handlers = {
+    refresh: () => Promise<{ ok: boolean }>
+    status: () => Promise<Record<string, unknown>>
+  }
+
+  test("a refresh that changed the directory is pending; the same directory is not", async () => {
+    let entries: unknown[] = [{ slug: "shared" }]
+    mock = await startMockCpa({ directory: () => ({ body: { models: entries } }) })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: A_KEY, modelsDev: false } })
+    await plugin.setup(host.ctx as unknown as Parameters<typeof plugin.setup>[0])
+    host.restoreConsole()
+    const handlers = host.rpcRegistrations[0]!.handlers as Handlers
+
+    // The binding the boot compile picked up is effective.
+    expect(await handlers.status()).toMatchObject({ applied: true, reloadRequired: false })
+    // A refresh that found the same directory needs no reload.
+    await handlers.refresh()
+    expect(await handlers.status()).toMatchObject({ applied: true, reloadRequired: false })
+    // A changed directory is saved but not effective until the location reloads.
+    entries = [{ slug: "shared" }, { slug: "added" }]
+    expect((await handlers.refresh()).ok).toBe(true)
+    expect(await handlers.status()).toMatchObject({ applied: false, reloadRequired: true })
+  })
+
+  test("the applied Fast effect is reported while a new directory is pending", async () => {
+    let entries: unknown[] = [{ slug: "shared", service_tiers: ["priority"] }]
+    mock = await startMockCpa({ directory: () => ({ body: { models: entries } }) })
+    host = createFakeHost({
+      options: { baseURL: mock.url, apiKey: A_KEY, modelsDev: false },
+      storage: { "cliproxyapi.fast.cliproxyapi": true },
+    })
+    await plugin.setup(host.ctx as unknown as Parameters<typeof plugin.setup>[0])
+    host.restoreConsole()
+    const handlers = host.rpcRegistrations[0]!.handlers as Handlers
+
+    expect(await handlers.status()).toMatchObject({ fastEffectiveModels: 1, applied: true })
+    // The directory withdrew the tier, but the runtime still asks for priority.
+    entries = [{ slug: "shared" }]
+    await handlers.refresh()
+    expect(await handlers.status()).toMatchObject({
+      fastEnabled: true,
+      fastEffectiveModels: 1,
+      applied: false,
+      reloadRequired: true,
+    })
+  })
+})
+
 describe("F03 a live rebind rebuilds the provider registry", () => {
   let host: FakeHost | undefined
   let mock: Awaited<ReturnType<typeof startMockCpa>> | undefined

@@ -23,6 +23,8 @@ function snapshot(overrides: Partial<ConnectionSnapshot> = {}): ConnectionSnapsh
     catalogModels: 2,
     fastEnabled: false,
     fastEffectiveModels: 0,
+    applied: true,
+    reloadRequired: false,
     generation: 3,
     updatedAt: 1,
     ...overrides,
@@ -136,11 +138,26 @@ function fakeRpc(overrides: Partial<ConnectionRpc> = {}): {
       return snapshot()
     },
     verify: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot() }),
-    connect: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot({ address: "http://new.test" }) }),
-    refresh: async () => ({ ok: true, kind: "ok", models: 2, snapshot: snapshot({ catalogFetchedAt: 1 }) }),
+    connect: async () => ({
+      ok: true,
+      kind: "ok",
+      models: 2,
+      snapshot: snapshot({ address: "http://new.test", applied: false, reloadRequired: true }),
+    }),
+    refresh: async () => ({
+      ok: true,
+      kind: "ok",
+      models: 2,
+      snapshot: snapshot({ catalogFetchedAt: 1, applied: false, reloadRequired: true }),
+    }),
     setFast: async ({ enabled }) => ({
       ok: true,
-      snapshot: snapshot({ fastEnabled: enabled, fastEffectiveModels: enabled ? 2 : 0 }),
+      snapshot: snapshot({
+        fastEnabled: enabled,
+        fastEffectiveModels: enabled ? 2 : 0,
+        applied: false,
+        reloadRequired: true,
+      }),
     }),
     pause: async () => ({ paused: true, changedAt: 1, waiting: 0, scope: "location" }),
     resume: async () => ({ paused: false, changedAt: 2, waiting: 0, scope: "location" }),
@@ -256,6 +273,28 @@ describe("createConnectionView", () => {
     expect(order).toEqual([])
   })
 
+  test("does not reload when the server reports the change is already applied", async () => {
+    const fake = fakeRpc({
+      connect: async () => ({
+        ok: true,
+        kind: "ok",
+        models: 2,
+        snapshot: snapshot({ address: "http://new.test", applied: true, reloadRequired: false }),
+      }),
+    })
+    const order: string[] = []
+    const view = createConnectionView({
+      rpc: { ...fake.rpc, status: async () => snapshot({ address: "http://new.test" }) },
+      directory: "/work/one",
+      reload: async () => {
+        order.push("reload")
+      },
+    })
+    const saved = await view.connect("http://new.test", "sk-fake")
+    expect(saved.ok).toBe(true)
+    expect(order).toEqual([])
+  })
+
   test("persists Fast, reloads the location and re-reads the authoritative snapshot", async () => {
     const fake = fakeRpc()
     const order: string[] = []
@@ -264,7 +303,15 @@ describe("createConnectionView", () => {
         ...fake.rpc,
         setFast: async ({ enabled }) => {
           order.push(`set:${enabled}`)
-          return { ok: true, snapshot: snapshot({ fastEnabled: enabled, fastEffectiveModels: 0 }) }
+          return {
+            ok: true,
+            snapshot: snapshot({
+              fastEnabled: enabled,
+              fastEffectiveModels: 0,
+              applied: false,
+              reloadRequired: true,
+            }),
+          }
         },
         status: async () => {
           order.push("status")
@@ -305,6 +352,29 @@ describe("createConnectionView", () => {
     expect(report.ok).toBe(true)
     expect(report.models).toBe(2)
     expect(view.snapshot()?.catalogFetchedAt).toBe(1)
+  })
+
+  test("applies a background change the server reports as pending", async () => {
+    const fake = fakeRpc()
+    let pending = false
+    const order: string[] = []
+    const view = createConnectionView({
+      rpc: {
+        ...fake.rpc,
+        status: async () => snapshot({ applied: !pending, reloadRequired: pending }),
+      },
+      directory: "/work/one",
+      reload: async () => {
+        order.push("reload")
+        pending = false
+      },
+    })
+    const unsubscribe = view.subscribe()
+    pending = true
+    fake.emit({ location: { directory: "/work/one" } })
+    await new Promise((done) => setTimeout(done, 10))
+    unsubscribe()
+    expect(order).toEqual(["reload"])
   })
 
   test("forwards a stale event for this location only, once shaped as expected", async () => {

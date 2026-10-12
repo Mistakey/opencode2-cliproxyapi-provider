@@ -1,6 +1,6 @@
 # OpenCode v2 CPA provider
 
-本项目开发 OpenCode v2 的 CLIProxyAPI provider 插件，尽量对齐 CPA 官方 Pi 插件的功能，按 v2 的机制实现。当前仅完成设计，尚无插件实现或运行验证。
+本项目开发 OpenCode v2 的 CLIProxyAPI provider 插件，尽量对齐 CPA 官方 Pi 插件的功能，按 v2 的机制实现。切片已实现，并在隔离的 `@opencode/cli` 2.0.26 宿主上用 loopback mock CPA 与虚构凭证验证；真实 CPA 联调与费用仍待人工授权，独立复查与最终验收尚未完成。
 
 ## Language
 
@@ -22,6 +22,9 @@ _Avoid_: 软件自带压缩、普通压缩
 **Fast**：向目录声明支持的模型请求 priority 服务档位的独立偏好；不等于提高推理档位，也不保证服务端一定提供更低延迟。
 
 **stale 模型**：同一连接此前发现、当前目录暂时缺失而在保留窗口内的模型；仍在列表不表示上游此刻可调用。
+
+**生效边界（apply boundary）**：插件保存并验证连接与目录，与运行时真正按新目录分发请求之间的边界。宿主在 location boot/reload 时编译 provider registry，所以未 reload 前 snapshot 报 `reloadRequired: true`、`applied: false`，运行时仍按已应用的目录与参数分发；TUI 自动 reload，无界面调用方读该标志后调用宿主公开的 location reload 再确认。
+_Avoid_: 把可见模型列表更新等同于运行时已生效
 
 ## Relationships
 

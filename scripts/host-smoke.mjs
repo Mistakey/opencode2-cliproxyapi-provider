@@ -372,22 +372,32 @@ async function main() {
     const toggled = await rpc("setFast", { enabled: true })
     record(
       "setFast persists the preference before the provider registry is rebuilt",
-      toggled?.ok === true && toggled?.snapshot?.fastEnabled === true && toggled?.snapshot?.fastEffectiveModels === 0,
+      toggled?.ok === true &&
+        toggled?.snapshot?.fastEnabled === true &&
+        toggled?.snapshot?.fastEffectiveModels === 0 &&
+        toggled?.snapshot?.reloadRequired === true &&
+        toggled?.snapshot?.applied === false,
       JSON.stringify({
         ok: toggled?.ok,
         fast: toggled?.snapshot?.fastEnabled,
         effective: toggled?.snapshot?.fastEffectiveModels,
+        applied: toggled?.snapshot?.applied,
       }),
     )
     await reload()
     const onStatus = await rpc("status", {})
     record(
       "the location reload applies Fast to the declared-capable model only",
-      onStatus?.fastEnabled === true && onStatus?.fastEffectiveModels === 1 && onStatus?.catalogModels === 3,
+      onStatus?.fastEnabled === true &&
+        onStatus?.fastEffectiveModels === 1 &&
+        onStatus?.catalogModels === 3 &&
+        onStatus?.applied === true &&
+        onStatus?.reloadRequired === false,
       JSON.stringify({
         fast: onStatus?.fastEnabled,
         effective: onStatus?.fastEffectiveModels,
         models: onStatus?.catalogModels,
+        applied: onStatus?.applied,
       }),
     )
 

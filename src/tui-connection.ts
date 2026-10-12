@@ -176,6 +176,7 @@ export function describeDetail(
     `key: ${snapshot.keyHint} (from ${snapshot.keySource ?? "unknown"})`,
     `saved: ${snapshot.keySaved ? "yes" : "no"}`,
     `verified: ${snapshot.verified === "failed" && snapshot.verifyKind ? `failed (${snapshot.verifyKind})` : snapshot.verified}`,
+    `apply: ${snapshot.reloadRequired === true ? "reload required before the runtime dispatches this directory" : "live in the runtime"}`,
     `models: ${snapshot.catalogModels ?? "(unknown)"}`,
     `last refresh: ${formatTime(snapshot.catalogFetchedAt)}${snapshot.catalogFromCache ? " (from cache)" : ""}`,
     `stale: ${snapshot.catalogStaleModels ?? 0}${snapshot.catalogStaleIds?.length ? ` (${snapshot.catalogStaleIds.join(", ")})` : ""}`,
@@ -391,15 +392,32 @@ export function createConnectionView(input: {
 
   // The host compiles the provider registry when the location boots, so a
   // committed connection or directory change only reaches the wire after a
-  // reload. The TUI performs it instead of asking the user to. A reload failure
-  // is not fatal: the change is already persisted and applies on the next boot.
-  const reloadForEffect = async (): Promise<void> => {
-    try {
-      await input.reload?.()
-    } catch {
-      // Reported through the refreshed snapshot instead of failing the operation.
+  // reload. The TUI performs it instead of asking the user to, but only when the
+  // server says the new state is not effective yet: a refresh that found the
+  // same directory reports reloadRequired: false and is left alone.
+  let reloading = false
+  const reloadForEffect = async (report: ConnectionReport | undefined): Promise<void> => {
+    if (report?.snapshot?.reloadRequired !== true || reloading) {
+      await refresh()
+      return
     }
-    await refresh()
+    reloading = true
+    try {
+      try {
+        await input.reload?.()
+      } catch {
+        // Reported through the refreshed snapshot instead of failing the operation.
+      }
+      await refresh()
+    } finally {
+      reloading = false
+    }
+  }
+
+  /** Apply a change the server committed outside a user action, such as a background refresh. */
+  const settlePending = async (): Promise<void> => {
+    if (snapshot?.reloadRequired !== true || reloading) return
+    await reloadForEffect({ ok: true, snapshot })
   }
 
   return {
@@ -420,13 +438,13 @@ export function createConnectionView(input: {
     refresh,
     refreshCatalog: async () => {
       const report = applyReport(parseReport(await input.rpc.refresh({})))
-      if (report.ok) await reloadForEffect()
+      if (report.ok) await reloadForEffect(report)
       return report
     },
     subscribe: () => {
       const stopChanged = input.rpc.events.on("changed", (event) => {
         if (!matchesLocation(event, input.directory)) return
-        void refresh()
+        void refresh().then(settlePending)
       })
       const stopStale = input.rpc.events.on("stale", (event) => {
         if (!matchesLocation(event, input.directory)) return
@@ -462,12 +480,12 @@ export function createConnectionView(input: {
     },
     connect: async (address, key) => {
       const report = applyReport(parseReport(await input.rpc.connect({ address, key })))
-      if (report.ok) await reloadForEffect()
+      if (report.ok) await reloadForEffect(report)
       return report
     },
     setFast: async (enabled) => {
       const report = parseReport(await input.rpc.setFast({ enabled }))
-      await reloadForEffect()
+      await reloadForEffect(report)
       return report ?? { ok: false, kind: "unreachable", message: "the server returned an unexpected response" }
     },
     pauseRequests: () => applyPauseResult(input.rpc.pause({})),

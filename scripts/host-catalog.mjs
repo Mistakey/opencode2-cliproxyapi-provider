@@ -228,6 +228,13 @@ async function main() {
         staleModels.map((model) => model.id).join(",") === "alpha,beta",
       JSON.stringify({ models: refreshed.models, stale: stale.catalogStaleIds }),
     )
+    // The retained model keeps the same definition, so the runtime dispatches
+    // the same thing and no reload is required for the stale mark alone.
+    record(
+      "a refresh that only marks a model stale needs no reload",
+      stale.reloadRequired === false && stale.applied === true,
+      JSON.stringify({ applied: stale.applied, reloadRequired: stale.reloadRequired }),
+    )
     const betaModel = staleModels.find((model) => model.id === "beta")
     record(
       "a stale model stays registered and selectable while it is retained",
@@ -359,8 +366,10 @@ async function main() {
       reloadGets >= 2 &&
         !afterReloadModels.some((model) => model.id === "reload-b") &&
         afterReloadModels.map((model) => model.id).sort().join(",") === "alpha,beta" &&
-        afterReload.catalogModels === 2,
-      JSON.stringify({ gets: reloadGets, models: afterReloadModels.map((model) => model.id) }),
+        afterReload.catalogModels === 2 &&
+        afterReload.applied === true &&
+        afterReload.reloadRequired === false,
+      JSON.stringify({ gets: reloadGets, models: afterReloadModels.map((model) => model.id), applied: afterReload.applied }),
     )
     await inflight
   } finally {

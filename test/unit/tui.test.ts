@@ -32,6 +32,8 @@ function snapshot(overrides: Partial<ConnectionSnapshot> = {}): ConnectionSnapsh
     catalogModels: 2,
     fastEnabled: false,
     fastEffectiveModels: 0,
+    applied: true,
+    reloadRequired: false,
     generation: 1,
     updatedAt: 1,
     ...overrides,
@@ -71,6 +73,9 @@ function createFakeTui() {
           rpcCalls.push({ method: "setFast", input })
           server.fastEnabled = input.enabled
           server.fastEffectiveModels = input.enabled ? 2 : 0
+          // The runtime keeps the previous settings until the location reloads.
+          server.applied = false
+          server.reloadRequired = true
           return { ok: true, snapshot: { ...server } }
         },
         refresh: async (input: unknown) => {
@@ -98,6 +103,8 @@ function createFakeTui() {
       location: {
         reload: async () => {
           reloads += 1
+          server.applied = true
+          server.reloadRequired = false
         },
       },
     },

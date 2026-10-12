@@ -149,6 +149,36 @@ http://127.0.0.1:8317/v1             -> baseURL http://127.0.0.1:8317/v1
 The directory is read from `<baseURL>/models?client_version=<this plugin>`, and
 the Responses runtime appends `/responses` to `baseURL`.
 
+## Applying a connection or directory change
+
+The host compiles the provider registry when a location boots, so a connection
+switch, a directory refresh or a Fast toggle is **saved** the moment it is
+committed but only **dispatched** after the location reloads. The snapshot keeps
+the two apart with machine-readable fields:
+
+- `applied` — the runtime has compiled the directory the snapshot describes;
+- `reloadRequired` — a newer saved directory or preference still needs a location
+  reload before the runtime dispatches it;
+- `fastEffectiveModels` — how many models the runtime currently asks for
+  priority, so it describes the applied state, not the pending one.
+
+`connect`, `refresh` and `setFast` return this snapshot. The TUI acts on it: it
+reloads the location only when `reloadRequired` is true (a refresh that found the
+same directory reports `false` and is left alone), then re-reads the snapshot. A
+headless caller does the same explicitly:
+
+```ts
+const result = await client.rpc.call({ rpcID: "cliproxyapi", method: "refresh", input: {} })
+if (result.output.snapshot.reloadRequired) await client.location.reload()
+const status = await client.rpc.call({ rpcID: "cliproxyapi", method: "status", input: {} })
+// status.output.applied === true
+```
+
+Until that reload the runtime still dispatches the previous directory, including
+its Fast setting, and the snapshot says so instead of claiming the new one is
+effective. The plugin does not hot-update the runtime itself: `location.reload()`
+is the host's public boundary.
+
 ## Transport, recovery and compaction
 
 OpenCode selects a transport per provider, so the plugin decides once per
@@ -249,9 +279,9 @@ connection:
 | --- | --- | --- |
 | `status` | `{}` | the connection snapshot |
 | `verify` | `{ address, key? }` | probe result; nothing is saved |
-| `connect` | `{ address, key }` | verifies, saves through the native key method, rebinds models |
-| `refresh` | `{}` | re-reads the active connection's directory, bypassing the cache |
-| `setFast` | `{ enabled }` | persists the Fast preference and returns the new snapshot |
+| `connect` | `{ address, key }` | verifies, saves through the native key method, rebinds models; `snapshot.reloadRequired` says whether the runtime still needs a location reload |
+| `refresh` | `{}` | re-reads the active connection's directory, bypassing the cache; `snapshot.reloadRequired` marks an unapplied change |
+| `setFast` | `{ enabled }` | persists the Fast preference and returns the new snapshot; `snapshot.reloadRequired` marks an unapplied change |
 | `pause` | `{}` | pause state; stops the next CPA request |
 | `resume` | `{}` | pause state; releases the waiting requests |
 | `pauseState` | `{}` | pause state without changing it |
@@ -266,8 +296,10 @@ on every step). Each event and call carries a `location`; external clients
 receive events from every location and must filter. The snapshot never contains
 the key, only `(redacted, N chars)`; it also reports `catalogModels`,
 `catalogFetchedAt`, `catalogStaleModels`/`catalogStaleIds` and
-`catalogFromCache`, keeps the Fast preference (`fastEnabled`) apart from what is
-registered right now (`fastEffectiveModels`), reports how many models carry a
+`catalogFromCache`, keeps the Fast preference (`fastEnabled`) apart from what the
+runtime dispatches right now (`fastEffectiveModels`), reports whether that
+directory is live (`applied`) or still needs a location reload
+(`reloadRequired`), reports how many models carry a
 price estimate (`costModels`), and reports the transport decision (`transport`,
 `transportSource`, `directoryPrefersWebSocket`, `transportNote`) and the
 compaction mechanism (`compaction`, `compactionNote`). Neither the pause state
@@ -387,8 +419,10 @@ or its effort.
 when the location boots, so the parameter reaches the wire after the location
 reload that the TUI performs (or after a service restart). The snapshot keeps the
 two apart: `fastEnabled` is the preference and `fastEffectiveModels` is how many
-registered models actually send the parameter, so "Fast on, but the directory
-declares no capable model" is a visible state rather than a silent no-op.
+models the runtime actually asks for priority, so "Fast on, but the directory
+declares no capable model" is a visible state rather than a silent no-op, and a
+pending change is reported as `reloadRequired` instead of an effective count.
+See [Applying a connection or directory change](#applying-a-connection-or-directory-change).
 
 **Prices** are estimates from the public models.dev catalog, matched with the
 same rules the official plugin uses: an explicit alias table for proxy-specific

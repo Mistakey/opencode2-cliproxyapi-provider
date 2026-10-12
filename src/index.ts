@@ -106,8 +106,38 @@ interface ProviderBinding {
 
 interface ProviderBinder {
   /** Replace the bound directory and rebuild the registry that resolves it. */
-  bind(input: ProviderBinding): Promise<void>
+  bind(input: ProviderBinding): Promise<{ pending: boolean }>
+  /** The runtime has compiled the current binding at location boot. */
+  markApplied(): void
   dispose(): Promise<void>
+}
+
+/**
+ * Stable identity of what the runtime must compile: everything that changes a
+ * request (address, package, transport, per-model settings/variants/limits).
+ * Used to tell a real directory change from a refresh that found the same one.
+ */
+function bindingSignature(input: ProviderBinding): string {
+  return JSON.stringify({
+    providerID: String(input.providerID),
+    providerName: input.providerName,
+    integrationID: String(input.integrationID),
+    packageID: input.packageID,
+    transport: input.transport,
+    compaction: input.compaction,
+    baseURL: input.baseURL,
+    sourceConnection: input.sourceConnection ? JSON.stringify(input.sourceConnection) : null,
+    models: input.models
+      .map((model) => ({
+        id: String(model.modelID),
+        enabled: model.enabled,
+        settings: model.settings ?? null,
+        variants: (model.variants ?? []).map((variant) => ({ id: String(variant.id), settings: variant.settings })),
+        limit: model.limit ?? null,
+        capabilities: model.capabilities ?? null,
+      }))
+      .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)),
+  })
 }
 
 /**
@@ -118,9 +148,15 @@ interface ProviderBinder {
  * refresh would leave the stale captured inventory in place, and a `reload()`
  * would replay that stale inventory. `bind` also calls `provider.reload()`, which
  * is the public way to carry a changed binding into the registry.
+ *
+ * The runtime only compiles that registry at location boot, so `bind` reports
+ * whether the new binding differs from the one the boot compile picked up: that
+ * is the machine-readable boundary a headless caller acts on with a location
+ * reload, and it is why a refresh that found the same directory is not pending.
  */
 async function createProviderBinder(ctx: Context): Promise<ProviderBinder> {
   let binding: ProviderBinding | undefined
+  let appliedSignature: string | undefined
   const registration = await ctx.provider.transform((editor) => {
     if (!binding) return
     editor.add({
@@ -146,6 +182,12 @@ async function createProviderBinder(ctx: Context): Promise<ProviderBinder> {
     async bind(input) {
       binding = input
       await ctx.provider.reload()
+      return {
+        pending: appliedSignature !== undefined && bindingSignature(input) !== appliedSignature,
+      }
+    },
+    markApplied() {
+      if (binding) appliedSignature = bindingSignature(binding)
     },
     dispose: () => registration.dispose(),
   }
@@ -293,6 +335,8 @@ async function setupConnection(ctx: Context) {
     verified: "unknown",
     fastEnabled,
     fastEffectiveModels: 0,
+    applied: true,
+    reloadRequired: false,
   })
 
   // Price is a supplement, never a gate: the lookup runs beside the directory
@@ -335,6 +379,49 @@ async function setupConnection(ctx: Context) {
     costModels: models.filter((model) => (model.cost?.length ?? 0) > 0).length,
   })
 
+  // The Fast effect the runtime actually has compiled. A live rebind changes the
+  // registered models but not the compiled ones, so this only moves when the
+  // binding is applied (at boot) or a bind found the same directory again.
+  let appliedFastEffectiveModels = 0
+
+  /**
+   * Publish one directory as the provider binding.
+   *
+   * Returns whether the runtime still needs a location reload before it
+   * dispatches this binding; the caller puts that in the snapshot so a headless
+   * client can act on it instead of trusting the visible model list.
+   */
+  const applyBinding = async (
+    record: CatalogRecord,
+  ): Promise<{
+    pending: boolean
+    models: Model.Info[]
+    policy: TransportPolicy
+    compaction: CompactionPolicy
+  }> => {
+    const models = await modelsForRecord(record)
+    // The transport is a property of the directory this record came from, so a
+    // cached record restores the same decision a fresh read would have made.
+    const policy = policyFor(record.models.map((state) => state.entry))
+    const compaction = compactionFor(policy)
+    const connection = await ctx.integration.connection.active(integrationID)
+    const bound = await binder.bind({
+      providerID,
+      providerName: explicit.providerName,
+      integrationID,
+      packageID: policy.package,
+      transport: policy.transport,
+      compaction: compaction.type,
+      baseURL: record.baseURL,
+      models,
+      ...(connection ? { sourceConnection: connection } : {}),
+    })
+    if (!bound.pending) appliedFastEffectiveModels = recordStats(record, models).fastEffectiveModels
+    if (policy.note) console.warn(`[${PLUGIN_ID}] transport: ${policy.note}`)
+    if (compaction.note) console.warn(`[${PLUGIN_ID}] compaction: ${compaction.note}`)
+    return { pending: bound.pending, models, policy, compaction }
+  }
+
   const store: CatalogStore = createStorageCatalogStore(ctx.storage as unknown as StorageLike)
 
   // A stale model is warned about once per selection, not on every request.
@@ -362,25 +449,7 @@ async function setupConnection(ctx: Context) {
       }),
     ...(explicit.catalogStaleTtlMs !== undefined ? { staleTtlMs: explicit.catalogStaleTtlMs } : {}),
     onCommit: async ({ generation, record, kind }) => {
-      const models = await modelsForRecord(record)
-      // The transport is a property of the directory this record came from, so a
-      // cached record restores the same decision a fresh read would have made.
-      const policy = policyFor(record.models.map((state) => state.entry))
-      const compaction = compactionFor(policy)
-      const connection = await ctx.integration.connection.active(integrationID)
-      await binder.bind({
-        providerID,
-        providerName: explicit.providerName,
-        integrationID,
-        packageID: policy.package,
-        transport: policy.transport,
-        compaction: compaction.type,
-        baseURL: record.baseURL,
-        models,
-        ...(connection ? { sourceConnection: connection } : {}),
-      })
-      if (policy.note) console.warn(`[${PLUGIN_ID}] transport: ${policy.note}`)
-      if (compaction.note) console.warn(`[${PLUGIN_ID}] compaction: ${compaction.note}`)
+      const { pending, models, policy, compaction } = await applyBinding(record)
       await publish(
         {
           catalogModels: models.length,
@@ -397,7 +466,10 @@ async function setupConnection(ctx: Context) {
           transportNote: policy.note,
           compaction: compaction.type,
           compactionNote: compaction.note,
-          ...recordStats(record, models),
+          applied: !pending,
+          reloadRequired: pending,
+          fastEffectiveModels: appliedFastEffectiveModels,
+          costModels: recordStats(record, models).costModels,
         },
         generation,
       )
@@ -562,9 +634,10 @@ async function setupConnection(ctx: Context) {
       })
     },
 
-    // Persist the Fast preference. The registered models only change when the
-    // host rebuilds the provider registry, which is a location reload (or a
-    // service restart); the snapshot keeps preference and effective state apart.
+    // Persist the Fast preference. Rebinding publishes the new per-model
+    // settings, but the runtime keeps the previous ones until a location reload,
+    // so the snapshot reports that boundary instead of claiming the new
+    // preference is effective.
     setFast: async (input) => {
       const enabled = readBoolean(input, "enabled")
       if (enabled === undefined) {
@@ -578,8 +651,22 @@ async function setupConnection(ctx: Context) {
           const detail = error instanceof Error ? error.message : String(error)
           console.warn(`[${PLUGIN_ID}] could not persist the Fast preference: ${detail}`)
         }
-        state.patch({ fastEnabled })
-        await registration?.events.emit("changed", state.read())
+        const record = service.current()
+        if (record) {
+          const { pending } = await applyBinding(record)
+          await publish(
+            {
+              fastEnabled,
+              applied: !pending,
+              reloadRequired: pending,
+              fastEffectiveModels: appliedFastEffectiveModels,
+            },
+            state.generation,
+          )
+        } else {
+          state.patch({ fastEnabled })
+          await registration?.events.emit("changed", state.read())
+        }
       }
       return { ok: true, snapshot: state.read() }
     },
@@ -730,28 +817,11 @@ async function setupConnection(ctx: Context) {
   const cached = await service.activate(identity, generation)
   if (!state.isCurrent(generation)) return cleanup
 
-  const sourceConnection = plan.store
-    ? ((await ctx.integration.connection.active(integrationID)) ?? activeConnection)
-    : activeConnection
-
   if (cached) {
     // Fast start: register the cached directory, then refresh in the background.
-    const models = await modelsForRecord(cached)
-    // The cached directory carries the transport metadata too, so a restored
-    // model selects the same transport it would after a fresh read.
-    const policy = policyFor(cached.models.map((state) => state.entry))
-    const compaction = compactionFor(policy)
-    await binder.bind({
-      providerID,
-      providerName: explicit.providerName,
-      integrationID,
-      packageID: policy.package,
-      transport: policy.transport,
-      compaction: compaction.type,
-      baseURL: cached.baseURL,
-      models,
-      ...(sourceConnection ? { sourceConnection } : {}),
-    })
+    const { pending, models, policy, compaction } = await applyBinding(cached)
+    // This bind is the one the boot compile picks up, so the runtime has it.
+    binder.markApplied()
     state.commit(generation, {
       address: plan.address,
       addressSource: plan.addressSource,
@@ -770,11 +840,12 @@ async function setupConnection(ctx: Context) {
       transportNote: policy.note,
       compaction: compaction.type,
       compactionNote: compaction.note,
-      ...recordStats(cached, models),
+      applied: !pending,
+      reloadRequired: pending,
+      fastEffectiveModels: appliedFastEffectiveModels,
+      costModels: recordStats(cached, models).costModels,
     })
     announce = true
-    if (policy.note) console.warn(`[${PLUGIN_ID}] transport: ${policy.note}`)
-    if (compaction.note) console.warn(`[${PLUGIN_ID}] compaction: ${compaction.note}`)
     console.log(
       `[${PLUGIN_ID}] serving ${models.length} cached models for ${cached.modelsURL} ` +
         `(connection ${plan.mode}, key ${redactKey(plan.key)}, transport ${policy.transport}, ` +
@@ -823,6 +894,8 @@ async function setupConnection(ctx: Context) {
   }
 
   const record = service.current()
+  // The initial read is the binding the boot compile picks up.
+  binder.markApplied()
   announce = true
   state.commit(generation, {
     address: plan.address,

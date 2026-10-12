@@ -99,6 +99,18 @@ export type ConnectionSnapshot = {
   readonly fastEnabled: boolean
   /** Registered models that currently send the priority parameter. */
   readonly fastEffectiveModels: number
+  /**
+   * Whether the runtime has compiled the directory this snapshot describes.
+   * The host compiles the provider registry at location boot, so a directory or
+   * preference changed after boot is saved but not yet effective.
+   */
+  readonly applied?: boolean
+  /**
+   * Whether a newer saved directory or preference still needs a location reload
+   * before the runtime dispatches it. A headless caller reads this flag, calls
+   * the host's public location reload, and re-reads the snapshot to confirm.
+   */
+  readonly reloadRequired?: boolean
   /** Registered models whose price is a models.dev estimate. */
   readonly costModels?: number
   /** Effective transport asked of the host for this connection. */

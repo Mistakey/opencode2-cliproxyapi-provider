@@ -306,6 +306,13 @@ async function main() {
       directoryRequests.at(-1)?.headers.authorization === `Bearer ${KEY_B}`,
       String(directoryRequests.at(-1)?.headers.authorization),
     )
+    // The runtime compiles the provider registry at boot, so a switched
+    // connection is saved and visible but not effective until the reload.
+    record(
+      "a switched connection is reported as pending until the location reloads",
+      afterSwitch?.reloadRequired === true && afterSwitch?.applied === false,
+      JSON.stringify({ applied: afterSwitch?.applied, reloadRequired: afterSwitch?.reloadRequired }),
+    )
 
     // 5. RPC state is scoped to the location that registered it.
     await client.integration.list(at(WORKSPACE))
