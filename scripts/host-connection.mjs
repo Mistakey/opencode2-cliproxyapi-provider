@@ -262,6 +262,32 @@ async function main() {
       `generation ${afterProbes?.generation}`,
     )
 
+    // A missing key is refused before any CPA request, even though a verified
+    // active connection is available: verify no longer borrows its credential.
+    const requestsBeforeNoKey = mockA.requests.length
+    let noKeyRejected = false
+    let noKeyDetail = "rejected"
+    try {
+      const noKey = await rpc("verify", { address: mockA.url }, HOME_DIR)
+      noKeyRejected = noKey?.ok === false && noKey?.kind === "auth"
+      noKeyDetail = `${noKey?.ok}:${noKey?.kind}`
+    } catch {
+      noKeyRejected = true
+    }
+    const afterNoKey = await status(HOME_DIR)
+    record(
+      "verify refuses a missing key before any CPA request",
+      noKeyRejected && mockA.requests.length === requestsBeforeNoKey,
+      `${noKeyDetail} requests +${mockA.requests.length - requestsBeforeNoKey}`,
+    )
+    record(
+      "a refused verify leaves the active connection intact",
+      afterNoKey?.address === savedGood?.address &&
+        afterNoKey?.verified === "ok" &&
+        afterNoKey?.generation === savedGood?.generation,
+      `generation ${afterNoKey?.generation}`,
+    )
+
     // 4. The wizard verifies before it saves, and switching rebinds the directory.
     const connectionsBefore = (await client.integration.list(at(HOME_DIR))).data.find(
       (entry) => entry.id === PROVIDER_ID,

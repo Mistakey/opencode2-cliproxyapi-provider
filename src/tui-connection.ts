@@ -20,7 +20,7 @@ export interface RpcEvent {
 /** The subset of the CPA RPC client this view uses. */
 export interface ConnectionRpc {
   readonly status: (input?: unknown) => Promise<unknown>
-  readonly verify: (input: { address: string; key?: string }) => Promise<unknown>
+  readonly verify: (input: { address: string; key: string }) => Promise<unknown>
   readonly connect: (input: { address: string; key: string }) => Promise<unknown>
   readonly refresh: (input?: unknown) => Promise<unknown>
   readonly setFast: (input: { enabled: boolean }) => Promise<unknown>
@@ -284,7 +284,7 @@ export interface ConnectionView {
   refreshCatalog(): Promise<ConnectionReport>
   /** Subscribe to server pushes; returns the unsubscribe function. */
   subscribe(): () => void
-  verify(address: string, key?: string): Promise<ConnectionReport>
+  verify(address: string, key: string): Promise<ConnectionReport>
   connect(address: string, key: string): Promise<ConnectionReport>
   /** Persist the Fast preference and reload the location so it reaches the wire. */
   setFast(enabled: boolean): Promise<ConnectionReport>
@@ -493,7 +493,7 @@ export function createConnectionView(input: {
       }
     },
     verify: async (address, key) => {
-      const report = parseReport(await input.rpc.verify(key === undefined ? { address } : { address, key }))
+      const report = parseReport(await input.rpc.verify({ address, key }))
       return applyReport(report)
     },
     connect: async (address, key) => {

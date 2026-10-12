@@ -573,26 +573,21 @@ async function setupConnection(ctx: Context) {
     // Read-only snapshot; a status reader never triggers a CPA request.
     status: async () => state.read(),
 
-    // Probe an address/key pair. Nothing is saved and the active connection is
-    // left exactly as it was, so a failed attempt cannot damage it.
+    // Probe an explicit address/key pair. Nothing is saved and the active
+    // connection is left exactly as it was, so a failed attempt cannot damage
+    // it. Both halves are required: the active credential is never borrowed, so
+    // a missing or blank key is refused before any request leaves the plugin.
     verify: async (input) => {
       const address = readString(input, "address")
       if (!address) {
         return { ok: false, kind: "address", message: "an address is required", snapshot: state.read() }
       }
-      let key = readString(input, "key")
-      if (!key) {
-        const connection = await ctx.integration.connection.active(integrationID)
-        const credential = connection
-          ? readCredential(connection, await ctx.integration.connection.resolve(connection))
-          : undefined
-        key = credential?.key
-      }
+      const key = readString(input, "key")
       if (!key) {
         return {
           ok: false,
           kind: "auth",
-          message: "no API key is available to verify; connect this integration first",
+          message: "an API key is required to verify; nothing was sent",
           snapshot: state.read(),
         }
       }

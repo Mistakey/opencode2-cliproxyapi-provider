@@ -175,7 +175,10 @@ export const CpaRpc = Rpc.define({
       input: emptyInput,
       output: snapshotSchema,
     },
-    /** Check an address/key pair against CPA without saving anything. */
+    /**
+     * Check an explicit address/key pair against CPA without saving anything.
+     * Both halves are required; the active credential is never borrowed.
+     */
     verify: {
       input: {
         type: "object",
@@ -183,7 +186,7 @@ export const CpaRpc = Rpc.define({
           address: { type: "string" },
           key: { type: "string" },
         },
-        required: ["address"],
+        required: ["address", "key"],
         additionalProperties: false,
       },
       output: resultSchema,

@@ -283,7 +283,7 @@ connection:
 | Method | Input | Output |
 | --- | --- | --- |
 | `status` | `{}` | the connection snapshot |
-| `verify` | `{ address, key? }` | probe result; nothing is saved |
+| `verify` | `{ address, key }` | probe result; nothing is saved; the active credential is never borrowed |
 | `connect` | `{ address, key }` | verifies, saves through the native key method, rebinds models; `snapshot.reloadRequired` says whether the runtime still needs a location reload |
 | `refresh` | `{}` | re-reads the active connection's directory, bypassing the cache; `snapshot.reloadRequired` marks an unapplied change |
 | `setFast` | `{ enabled }` | persists the Fast preference and returns the new snapshot; `snapshot.reloadRequired` marks an unapplied change |
@@ -477,9 +477,10 @@ OPENCODE_CLI=/path/to/opencode.exe OC2CPA_SANDBOX=/path/to/empty/sandbox node sc
 `scripts/host-connection.mjs` covers the connection experience: the native key
 and address form, saving through OpenCode's own credential store, the difference
 between saved and verified, every verify outcome (correct, 401, unreachable,
-empty, broken body, bad address), verify-before-save, switching without leaking
-the previous directory, per-location state, and a remote client that re-reads the
-snapshot after a disconnect.
+empty, broken body, bad address), a missing key refused before any CPA request,
+verify-before-save, switching without leaking the previous directory,
+per-location state, and a remote client that re-reads the snapshot after a
+disconnect.
 
 ```bash
 bun run smoke:connection

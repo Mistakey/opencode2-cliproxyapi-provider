@@ -136,6 +136,43 @@ describe("CPA connection RPC", () => {
     expect(host.connectCalls).toHaveLength(connectsBefore)
   })
 
+  test("verify requires an explicit key and never borrows the active credential", async () => {
+    mock = await startMockCpa({ models: [{ slug: "a" }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
+    await setup(host.ctx)
+    host.restoreConsole()
+    const handlers = handlersOf(host)
+    // The options above saved and verified an active connection, so a key is
+    // available to borrow if verify still fell back to it.
+    const before = await handlers.status!({})
+    const connectsBefore = host.connectCalls.length
+    const requestsBefore = mock.requests.length
+
+    // A missing key is refused before any request leaves the plugin.
+    expect(await handlers.verify!({ address: mock.url })).toMatchObject({ ok: false, kind: "auth" })
+    expect(mock.requests).toHaveLength(requestsBefore)
+
+    // A blank key is refused the same way.
+    expect(await handlers.verify!({ address: mock.url, key: "   " })).toMatchObject({ ok: false, kind: "auth" })
+    expect(mock.requests).toHaveLength(requestsBefore)
+
+    // Neither refusal changed the active credential, the directory or the store.
+    expect(await handlers.status!({})).toEqual(before)
+    expect(host.connectCalls).toHaveLength(connectsBefore)
+
+    // An explicit key is sent to the explicit address and still saves nothing.
+    const explicitKey = "sk-fake-explicit-abcdef0123456789"
+    expect(await handlers.verify!({ address: mock.url, key: explicitKey })).toMatchObject({
+      ok: true,
+      kind: "ok",
+      models: 1,
+    })
+    const directory = mock.requests.filter((request) => request.method === "GET").at(-1)
+    expect(directory?.headers.authorization).toBe(`Bearer ${explicitKey}`)
+    expect(await handlers.status!({})).toEqual(before)
+    expect(host.connectCalls).toHaveLength(connectsBefore)
+  })
+
   test("connect verifies first, then saves through the native key method and rebinds the directory", async () => {
     mock = await startMockCpa({ models: [{ slug: "old-model" }] })
     host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY } })
