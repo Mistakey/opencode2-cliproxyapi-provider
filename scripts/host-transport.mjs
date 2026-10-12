@@ -223,6 +223,18 @@ async function rpcSetFast(sandbox, directory, enabled) {
   return result.output
 }
 
+/** Re-read the active directory through the plugin's own RPC. */
+async function rpcRefresh(sandbox, directory) {
+  const client = await rpcClient(sandbox)
+  const result = await client.rpc.call({
+    rpcID: PROVIDER_ID,
+    method: "refresh",
+    input: {},
+    location: { directory },
+  })
+  return result.output
+}
+
 /** Ask the host to re-resolve the location's plugins after a connection switch. */
 async function reloadLocation(sandbox) {
   const client = await rpcClient(sandbox)
@@ -241,6 +253,7 @@ async function main() {
   if (wants("rotation")) await mainRotation()
   if (wants("fast")) await mainFastOverWebSocket()
   if (wants("cached")) await mainCachedTransport()
+  if (wants("apply-safety")) await mainApplySafety()
 
   const failed = checks.filter((check) => !check.ok)
   console.log(`\n${checks.length - failed.length}/${checks.length} checks passed`)
@@ -712,6 +725,154 @@ async function mainCachedTransport() {
         `${status.transport}/${status.transportSource}`,
       )
       record("the models came from the cache", status.catalogFromCache === true, String(status.catalogFromCache))
+    },
+  )
+}
+
+/**
+ * Pending tier withdrawal: a request must not send a priority the saved
+ * directory no longer declares until the host's public location reload applies
+ * it. Covers both the HTTP/SSE and WebSocket paths with the same model id and
+ * key, and the reload that makes the withdrawal effective.
+ */
+async function mainApplySafety() {
+  const httpModels = [
+    {
+      slug: MODEL_ID,
+      display_name: "Apply HTTP",
+      service_tiers: ["priority"],
+      supported_reasoning_levels: [{ effort: "high" }],
+    },
+  ]
+  await withHost(
+    "transport-apply-http",
+    { mock: { models: httpModels, responses: () => ({ text: "apply answer" }) } },
+    async ({ sandbox, env, mock }) => {
+      const workspace = join(sandbox, "ws")
+      await rpcSetFast(sandbox, workspace, true)
+      await reloadLocation(sandbox)
+      await sleep(800)
+      const applied = await rpcStatus(sandbox, workspace)
+      record(
+        "apply-safety HTTP: Fast is applied and effective",
+        applied.applied === true && applied.fastEffectiveModels === 1,
+        JSON.stringify({ applied: applied.applied, effective: applied.fastEffectiveModels }),
+      )
+      const priorityRequests = () =>
+        mock.state.httpRequests.filter(
+          (entry) => entry.method === "POST" && typeof entry.raw === "string" && entry.raw.includes('"service_tier":"priority"'),
+        ).length
+      const before = await prompt(env, sandbox, "ses_apply_http_before", "say one")
+      record(
+        "apply-safety HTTP: the applied Fast request carries priority",
+        before.code === 0 && priorityRequests() > 0,
+        `code=${before.code} priority=${priorityRequests()}`,
+      )
+
+      // The directory withdraws the tier: the change is saved, not yet applied.
+      httpModels.splice(0, httpModels.length, {
+        slug: MODEL_ID,
+        display_name: "Apply HTTP",
+        supported_reasoning_levels: [{ effort: "low" }],
+      })
+      const pending = await rpcRefresh(sandbox, workspace)
+      record(
+        "apply-safety HTTP: the withdrawal is reported pending, not effective",
+        pending.snapshot?.applied === false && pending.snapshot?.reloadRequired === true && pending.snapshot?.fastEffectiveModels === 1,
+        JSON.stringify(pending.snapshot),
+      )
+      const count = priorityRequests()
+      const refused = await prompt(env, sandbox, "ses_apply_http_pending", "say one")
+      record(
+        "apply-safety HTTP: a new request does not send the withdrawn priority",
+        priorityRequests() === count,
+        `code=${refused.code} priority=${priorityRequests()}`,
+      )
+      record("apply-safety HTTP: the unsafe dispatch is refused, not sent", refused.code !== 0, refused.out.trim().split("\n").slice(-1)[0])
+
+      await reloadLocation(sandbox)
+      await sleep(800)
+      const after = await rpcStatus(sandbox, workspace)
+      record(
+        "apply-safety HTTP: the public reload applies the withdrawal",
+        after.applied === true && after.fastEffectiveModels === 0,
+        JSON.stringify({ applied: after.applied, effective: after.fastEffectiveModels }),
+      )
+      const appliedLow = await prompt(env, sandbox, "ses_apply_http_after", "say one")
+      record(
+        "apply-safety HTTP: the request after the reload carries no priority",
+        appliedLow.code === 0 && priorityRequests() === count,
+        `code=${appliedLow.code} priority=${priorityRequests()}`,
+      )
+    },
+  )
+
+  const wsModels = [
+    {
+      slug: MODEL_ID,
+      display_name: "Apply WS",
+      prefer_websockets: true,
+      service_tiers: ["priority"],
+      supported_reasoning_levels: [{ effort: "high" }],
+    },
+  ]
+  await withHost(
+    "transport-apply-ws",
+    { mock: { models: wsModels, responses: () => ({ text: "apply answer" }) } },
+    async ({ sandbox, env, mock }) => {
+      const workspace = join(sandbox, "ws")
+      await rpcSetFast(sandbox, workspace, true)
+      await reloadLocation(sandbox)
+      await sleep(800)
+      const applied = await rpcStatus(sandbox, workspace)
+      record(
+        "apply-safety WS: Fast is applied on the WebSocket path",
+        applied.applied === true && applied.fastEffectiveModels === 1 && applied.transport === "websocket",
+        JSON.stringify({ applied: applied.applied, effective: applied.fastEffectiveModels, transport: applied.transport }),
+      )
+      const priorityFrames = () => mock.state.frames.filter((frame) => frame.body?.service_tier === "priority").length
+      const before = await prompt(env, sandbox, "ses_apply_ws_before", "say one")
+      record(
+        "apply-safety WS: the applied Fast frame carries priority",
+        before.code === 0 && priorityFrames() > 0,
+        `code=${before.code} priority=${priorityFrames()}`,
+      )
+
+      wsModels.splice(0, wsModels.length, {
+        slug: MODEL_ID,
+        display_name: "Apply WS",
+        prefer_websockets: true,
+        supported_reasoning_levels: [{ effort: "low" }],
+      })
+      const pending = await rpcRefresh(sandbox, workspace)
+      record(
+        "apply-safety WS: the withdrawal is reported pending, not effective",
+        pending.snapshot?.applied === false && pending.snapshot?.reloadRequired === true && pending.snapshot?.fastEffectiveModels === 1,
+        JSON.stringify(pending.snapshot),
+      )
+      const count = priorityFrames()
+      const refused = await prompt(env, sandbox, "ses_apply_ws_pending", "say one")
+      record(
+        "apply-safety WS: a new frame does not send the withdrawn priority",
+        priorityFrames() === count,
+        `code=${refused.code} priority=${priorityFrames()}`,
+      )
+      record("apply-safety WS: the unsafe dispatch is refused, not sent", refused.code !== 0, refused.out.trim().split("\n").slice(-1)[0])
+
+      await reloadLocation(sandbox)
+      await sleep(800)
+      const after = await rpcStatus(sandbox, workspace)
+      record(
+        "apply-safety WS: the public reload applies the withdrawal",
+        after.applied === true && after.fastEffectiveModels === 0,
+        JSON.stringify({ applied: after.applied, effective: after.fastEffectiveModels }),
+      )
+      const appliedLow = await prompt(env, sandbox, "ses_apply_ws_after", "say one")
+      record(
+        "apply-safety WS: the frame after the reload carries no priority",
+        appliedLow.code === 0 && priorityFrames() === count,
+        `code=${appliedLow.code} priority=${priorityFrames()}`,
+      )
     },
   )
 }

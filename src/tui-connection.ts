@@ -313,6 +313,46 @@ export function createConnectionView(input: {
 
   const notify = () => input.onUpdate?.()
 
+  // The host compiles the provider registry when the location boots, so a
+  // committed connection or directory change only reaches the wire after a
+  // reload. The TUI performs it instead of asking the user to, but only when the
+  // server says the new state is not effective yet: a refresh that found the
+  // same directory reports reloadRequired: false and is left alone.
+  let reloading = false
+
+  // A reload starts a new plugin generation, so the server's in-memory stats are
+  // gone. Drop the cached ones instead of rendering the previous generation's
+  // numbers as current.
+  const invalidateStats = () => {
+    statsCache.clear()
+    statsAttempted.clear()
+  }
+
+  const reloadForEffect = async (report: ConnectionReport | undefined): Promise<void> => {
+    if (report?.snapshot?.reloadRequired !== true || reloading) {
+      await refresh()
+      return
+    }
+    reloading = true
+    try {
+      try {
+        await input.reload?.()
+      } catch {
+        // Reported through the refreshed snapshot instead of failing the operation.
+      }
+      invalidateStats()
+      await refresh()
+    } finally {
+      reloading = false
+    }
+  }
+
+  /** Apply a change the server committed outside a user action, such as a background refresh. */
+  const settlePending = async (): Promise<void> => {
+    if (snapshot?.reloadRequired !== true || reloading) return
+    await reloadForEffect({ ok: true, snapshot })
+  }
+
   const refresh = async (): Promise<void> => {
     const wasConnected = connected
     try {
@@ -339,6 +379,10 @@ export function createConnectionView(input: {
       lastError = error instanceof Error ? error.message : String(error)
     }
     notify()
+    // An authoritative read is where a reconnect converges: if it reports a
+    // saved-but-unapplied change, apply it through the host's public reload
+    // instead of waiting for a live event that may have been missed.
+    if (!reloading && snapshot?.reloadRequired === true) await settlePending()
   }
 
   const refreshStats = async (sessionID: string): Promise<void> => {
@@ -393,33 +437,7 @@ export function createConnectionView(input: {
   // The host compiles the provider registry when the location boots, so a
   // committed connection or directory change only reaches the wire after a
   // reload. The TUI performs it instead of asking the user to, but only when the
-  // server says the new state is not effective yet: a refresh that found the
-  // same directory reports reloadRequired: false and is left alone.
-  let reloading = false
-  const reloadForEffect = async (report: ConnectionReport | undefined): Promise<void> => {
-    if (report?.snapshot?.reloadRequired !== true || reloading) {
-      await refresh()
-      return
-    }
-    reloading = true
-    try {
-      try {
-        await input.reload?.()
-      } catch {
-        // Reported through the refreshed snapshot instead of failing the operation.
-      }
-      await refresh()
-    } finally {
-      reloading = false
-    }
-  }
-
-  /** Apply a change the server committed outside a user action, such as a background refresh. */
-  const settlePending = async (): Promise<void> => {
-    if (snapshot?.reloadRequired !== true || reloading) return
-    await reloadForEffect({ ok: true, snapshot })
-  }
-
+  // server says the new state is not effective yet.
   return {
     snapshot: () => snapshot,
     connected: () => connected,
@@ -444,7 +462,7 @@ export function createConnectionView(input: {
     subscribe: () => {
       const stopChanged = input.rpc.events.on("changed", (event) => {
         if (!matchesLocation(event, input.directory)) return
-        void refresh().then(settlePending)
+        void refresh()
       })
       const stopStale = input.rpc.events.on("stale", (event) => {
         if (!matchesLocation(event, input.directory)) return

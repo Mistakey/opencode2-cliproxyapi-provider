@@ -108,7 +108,9 @@ location reload。snapshot 用机器可读的 `applied` / `reloadRequired` 区�
 偏好；未 apply 不得冒称生效。TUI 在 `reloadRequired` 时自动调用宿主公开的
 `location.reload()` 再重读快照；无界面调用方读同一标志后自行调用公开 reload。
 插件不自行热更新运行时、不新增脚本框架。binding 签名一致（目录未变）时不要求
-reload。此边界经 oc2cpa-bya.13 用户裁决（选项 B）确认，取代“插件可独立热更新”的
+reload。待 apply 期间，一个会携带已撤回 Fast tier 的**新**请求在公开请求 seam 上
+被拒绝（已在飞的请求不受影响），不把撤回档位发到 wire。此边界经 oc2cpa-bya.13
+用户裁决（选项 B）确认，取代“插件可独立热更新”的
 假设。
 
 ## 3. Verification

@@ -21,7 +21,7 @@
 
 import { Model, Plugin, Provider } from "@opencode/plugin"
 import { DEFAULT_BASE_URL, AddressError, resolveEndpoints } from "./address"
-import { fastEffectiveCount, toModelInfo, type CatalogEntry } from "./catalog"
+import { fastEffectiveCount, supportsFastServiceTier, toModelInfo, type CatalogEntry } from "./catalog"
 import { connectionFingerprint, countStale, staleIds, type CatalogRecord } from "./catalog-cache"
 import { CatalogService, type CatalogIdentity } from "./catalog-service"
 import { createStorageCatalogStore, type CatalogStore, type StorageLike } from "./catalog-store"
@@ -349,7 +349,11 @@ async function setupConnection(ctx: Context) {
   // so there are no subscribers, and awaiting the event bus here would hold up
   // model registration. Announcements start once setup has finished.
   let announce = false
-  const publish = async (update: ConnectionUpdate, generation: number): Promise<void> => {
+  const publish = async (update: ConnectionUpdate, generation: number, owns?: () => boolean): Promise<void> => {
+    // A commit that lost ownership must not publish its snapshot over the newer
+    // one; the caller passes its own guard so the check is the same one it uses
+    // for the provider binding.
+    if (owns && !owns()) return
     if (!state.commit(generation, update)) return
     if (!announce) return
     await registration?.events.emit("changed", state.read())
@@ -383,28 +387,94 @@ async function setupConnection(ctx: Context) {
   // registered models but not the compiled ones, so this only moves when the
   // binding is applied (at boot) or a bind found the same directory again.
   let appliedFastEffectiveModels = 0
+  // Model ids the compiled binding currently asks for priority. Used to refuse a
+  // new dispatch that would send a tier the saved directory has withdrawn.
+  let appliedPriorityModels = new Set<string>()
+
+  const priorityModels = (models: readonly Model.Info[]): Set<string> =>
+    new Set(
+      models
+        .filter((model) => (model.settings as { serviceTier?: string } | undefined)?.serviceTier !== undefined)
+        .map((model) => String(model.modelID)),
+    )
+
+  /**
+   * Whether the newest saved directory and preference still call for priority
+   * on this model. The instance's own record is not enough: the host may keep an
+   * older generation alive for a session, so another generation can have saved a
+   * directory that withdrew the tier. The persisted cache is the shared truth
+   * across generations, so a request only passes when both agree. A model that is
+   * gone is retained as stale with its declared capability.
+   */
+  const shouldSendPriority = async (modelID: string): Promise<boolean> => {
+    if (!fastEnabled) return false
+    const record = service.current()
+    if (!record) return false
+    const declared = (entries: CatalogRecord | undefined): boolean =>
+      entries !== undefined &&
+      entries.models.some((state) => state.entry.id === modelID && supportsFastServiceTier(state.entry))
+    if (!declared(record)) return false
+    if (record.fingerprint === "") return true
+    try {
+      const saved = await store.load(record.fingerprint)
+      if (saved) return declared(saved)
+    } catch {
+      // A storage read that fails must not turn into a wrong priority: fall back
+      // to the instance's own record.
+    }
+    return true
+  }
+
+  /**
+   * Resolve the host's active credential for a record and check it is the one the
+   * record belongs to. A refresh that read the previous connection must not bind
+   * its directory to a credential the user has since saved for another pair.
+   */
+  const activeConnectionFor = async (
+    record: CatalogRecord,
+  ): Promise<{ connection: ActiveConnection | undefined; matches: boolean }> => {
+    const connection = await ctx.integration.connection.active(integrationID)
+    if (!connection) return { connection: undefined, matches: true }
+    const credential = readCredential(connection, await ctx.integration.connection.resolve(connection))
+    if (!credential?.baseURL) return { connection, matches: true }
+    try {
+      const endpoints = resolveEndpoints(credential.baseURL)
+      return { connection, matches: connectionFingerprint(endpoints.baseURL, credential.key) === record.fingerprint }
+    } catch {
+      return { connection, matches: false }
+    }
+  }
 
   /**
    * Publish one directory as the provider binding.
    *
    * Returns whether the runtime still needs a location reload before it
    * dispatches this binding; the caller puts that in the snapshot so a headless
-   * client can act on it instead of trusting the visible model list.
+   * client can act on it instead of trusting the visible model list. Returns
+   * `undefined` when the commit lost ownership or the record does not belong to
+   * the active credential, in which case nothing is published.
    */
   const applyBinding = async (
     record: CatalogRecord,
-  ): Promise<{
-    pending: boolean
-    models: Model.Info[]
-    policy: TransportPolicy
-    compaction: CompactionPolicy
-  }> => {
+    owns?: () => boolean,
+  ): Promise<
+    | {
+        pending: boolean
+        models: Model.Info[]
+        policy: TransportPolicy
+        compaction: CompactionPolicy
+      }
+    | undefined
+  > => {
     const models = await modelsForRecord(record)
     // The transport is a property of the directory this record came from, so a
     // cached record restores the same decision a fresh read would have made.
     const policy = policyFor(record.models.map((state) => state.entry))
     const compaction = compactionFor(policy)
-    const connection = await ctx.integration.connection.active(integrationID)
+    const { connection, matches } = await activeConnectionFor(record)
+    // A newer commit or a connection change may have landed while this bind was
+    // being prepared; the newest commit owns the provider registry.
+    if (!matches || (owns && !owns())) return undefined
     const bound = await binder.bind({
       providerID,
       providerName: explicit.providerName,
@@ -416,7 +486,10 @@ async function setupConnection(ctx: Context) {
       models,
       ...(connection ? { sourceConnection: connection } : {}),
     })
-    if (!bound.pending) appliedFastEffectiveModels = recordStats(record, models).fastEffectiveModels
+    if (!bound.pending && (!owns || owns())) {
+      appliedFastEffectiveModels = recordStats(record, models).fastEffectiveModels
+      appliedPriorityModels = priorityModels(models)
+    }
     if (policy.note) console.warn(`[${PLUGIN_ID}] transport: ${policy.note}`)
     if (compaction.note) console.warn(`[${PLUGIN_ID}] compaction: ${compaction.note}`)
     return { pending: bound.pending, models, policy, compaction }
@@ -426,6 +499,13 @@ async function setupConnection(ctx: Context) {
 
   // A stale model is warned about once per selection, not on every request.
   let notifiedStale: string | undefined
+  // Set when the location unloads. A connect that already saved its key must not
+  // claim it became active after the plugin was disposed.
+  let disposed = false
+  // Candidate order for interactive connects. The native save is the point of no
+  // return, so a later candidate only supersedes an earlier one that has not
+  // saved yet.
+  let connectSeq = 0
   // Interactive connects verify before they touch anything, and only one commit
   // may be in flight at a time: a later connect supersedes an earlier one and
   // the earlier one must not save its credential after the later one committed.
@@ -448,8 +528,10 @@ async function setupConnection(ctx: Context) {
         signal,
       }),
     ...(explicit.catalogStaleTtlMs !== undefined ? { staleTtlMs: explicit.catalogStaleTtlMs } : {}),
-    onCommit: async ({ generation, record, kind }) => {
-      const { pending, models, policy, compaction } = await applyBinding(record)
+    onCommit: async ({ generation, record, kind, owns }) => {
+      const applied = await applyBinding(record, owns)
+      if (!applied) return
+      const { pending, models, policy, compaction } = applied
       await publish(
         {
           catalogModels: models.length,
@@ -472,6 +554,7 @@ async function setupConnection(ctx: Context) {
           costModels: recordStats(record, models).costModels,
         },
         generation,
+        owns,
       )
       if (notifiedStale !== undefined && !service.isStale(notifiedStale)) notifiedStale = undefined
     },
@@ -565,12 +648,10 @@ async function setupConnection(ctx: Context) {
         return { ok: false, kind: "address", message: detail, snapshot: state.read() }
       }
 
-      // Reserving the generation here (not inside the lock) means a later
-      // connect immediately supersedes an earlier one that is still verifying.
-      // The service adopts it too, so a candidate that never verifies leaves the
-      // active connection refreshable under the new generation.
-      const generation = state.begin()
-      service.adoptGeneration(generation)
+      // Candidate order decides supersession: a later connect stops an earlier
+      // one that has not saved yet. The native save itself is the point of no
+      // return and is never undone.
+      const candidate = ++connectSeq
       const identity: CatalogIdentity = {
         address,
         key,
@@ -580,13 +661,13 @@ async function setupConnection(ctx: Context) {
       }
 
       return withConnectLock(async () => {
-        const changed = {
+        const superseded = {
           ok: false as const,
           kind: "unreachable" as const,
           message: "the connection changed while this pair was being verified; nothing was saved",
           snapshot: state.read(),
         }
-        if (!state.isCurrent(generation)) return changed
+        if (candidate !== connectSeq) return superseded
 
         // The candidate is verified before the active connection is touched, so
         // a failed attempt leaves the service, its cache and the credential
@@ -596,7 +677,7 @@ async function setupConnection(ctx: Context) {
           apiKey: key,
           ...(explicit.catalogTimeoutMs !== undefined ? { timeoutMs: explicit.catalogTimeoutMs } : {}),
         })
-        if (!state.isCurrent(generation)) return changed
+        if (candidate !== connectSeq) return superseded
         if (!outcome.ok) {
           return {
             ok: false as const,
@@ -606,13 +687,45 @@ async function setupConnection(ctx: Context) {
           }
         }
 
-        // Verified: bind the service to this pair and commit it as one unit.
-        // Activating invalidates any in-flight read of the previous connection.
+        // Saving through the native key method is the commit point. Once it
+        // resolves the host's active credential is this pair, so the plugin must
+        // adopt it even if a later candidate has since been requested; otherwise
+        // the credential store, the served directory and the snapshot would
+        // disagree. A save that fails leaves the previous connection untouched.
+        try {
+          await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error)
+          return {
+            ok: false as const,
+            kind: "unreachable" as const,
+            message: `the API key could not be saved: ${detail}`,
+            snapshot: state.read(),
+          }
+        }
+        if (disposed) {
+          return {
+            ok: false as const,
+            kind: "unreachable" as const,
+            message: "the plugin unloaded after this key was saved; the saved key is not active",
+            snapshot: state.read(),
+          }
+        }
+
+        // Claim a fresh generation so an in-flight refresh of the previous
+        // connection is invalidated; activating drops any read of it and makes
+        // this pair the identity the service commits under.
+        const generation = state.begin()
         await service.activate(identity, generation)
-        if (!state.isCurrent(generation)) return changed
-        await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
-        if (!state.isCurrent(generation)) return changed
         await service.applyRead({ generation, entries: outcome.entries, kind: outcome.kind })
+        if (disposed) {
+          return {
+            ok: false as const,
+            kind: "unreachable" as const,
+            message: "the plugin unloaded after this key was saved; the saved key is not active",
+            snapshot: state.read(),
+          }
+        }
         await publish(
           connectionUpdate({
             address,
@@ -653,16 +766,22 @@ async function setupConnection(ctx: Context) {
         }
         const record = service.current()
         if (record) {
-          const { pending } = await applyBinding(record)
-          await publish(
-            {
-              fastEnabled,
-              applied: !pending,
-              reloadRequired: pending,
-              fastEffectiveModels: appliedFastEffectiveModels,
-            },
-            state.generation,
-          )
+          const applied = await applyBinding(record)
+          if (applied) {
+            const { pending } = applied
+            await publish(
+              {
+                fastEnabled,
+                applied: !pending,
+                reloadRequired: pending,
+                fastEffectiveModels: appliedFastEffectiveModels,
+              },
+              state.generation,
+            )
+          } else {
+            state.patch({ fastEnabled })
+            await registration?.events.emit("changed", state.read())
+          }
         } else {
           state.patch({ fastEnabled })
           await registration?.events.emit("changed", state.read())
@@ -715,6 +834,18 @@ async function setupConnection(ctx: Context) {
     "model.request",
     async (input) => {
       await pause.wait(String(input.sessionID))
+      // The runtime dispatches the directory it compiled at boot. When the saved
+      // directory has withdrawn a model's service tier, a new request would
+      // still carry the withdrawn priority until the location reloads. Refuse
+      // that new dispatch rather than send a parameter the directory no longer
+      // declares; a request already in flight passed this hook and is untouched.
+      const modelID = (input as { model?: { id?: unknown } }).model?.id
+      if (typeof modelID === "string" && appliedPriorityModels.has(modelID) && !(await shouldSendPriority(modelID))) {
+        throw new Error(
+          `CLIProxyAPI: the saved directory no longer declares the service tier for '${modelID}', ` +
+            `but the running runtime still asks for it. Reload the location before using this model.`,
+        )
+      }
     },
     { providerID: String(providerID) },
   )
@@ -750,6 +881,7 @@ async function setupConnection(ctx: Context) {
   })()
 
   const cleanup = async () => {
+    disposed = true
     subscription.abort()
     pause.releaseAll()
     service.dispose()
@@ -819,7 +951,14 @@ async function setupConnection(ctx: Context) {
 
   if (cached) {
     // Fast start: register the cached directory, then refresh in the background.
-    const { pending, models, policy, compaction } = await applyBinding(cached)
+    const applied = await applyBinding(cached)
+    if (!applied) {
+      console.error(
+        `[${PLUGIN_ID}] not registering models: the active credential does not match the cached connection`,
+      )
+      return cleanup
+    }
+    const { pending, models, policy, compaction } = applied
     // This bind is the one the boot compile picks up, so the runtime has it.
     binder.markApplied()
     state.commit(generation, {

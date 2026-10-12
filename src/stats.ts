@@ -369,7 +369,11 @@ export class SessionStatsTracker {
 
   #project(record: SessionRecord): SessionStats {
     const turn = record.turn
-    const lastTurn = turn ? this.#projectLiveTurn(turn) : record.lastTurn ? projectTurn(record.lastTurn) : undefined
+    const lastTurn = turn
+      ? this.#projectLiveTurn(turn, record.pauseStartedAt)
+      : record.lastTurn
+        ? projectTurn(record.lastTurn)
+        : undefined
     return {
       sessionID: record.sessionID,
       ...(record.parentID !== undefined ? { parentID: record.parentID } : {}),
@@ -383,14 +387,23 @@ export class SessionStatsTracker {
     }
   }
 
-  /** A turn still in progress: report the elapsed time so far, without mutating. */
-  #projectLiveTurn(turn: MutableTurn): TurnStats {
-    const durationMs = Math.max(0, this.#now() - turn.startedAt)
-    const effectiveMs = Math.max(0, durationMs - turn.pausedMs)
+  /**
+   * A turn still in progress: report the elapsed time so far, without mutating.
+   * A pause wait that is still open is part of the turn's wall time but not of
+   * its effective time, so it is subtracted here exactly as the closing turn
+   * would subtract it.
+   */
+  #projectLiveTurn(turn: MutableTurn, pauseStartedAt?: number): TurnStats {
+    const now = this.#now()
+    const durationMs = Math.max(0, now - turn.startedAt)
+    const openPauseMs =
+      pauseStartedAt === undefined ? 0 : Math.max(0, now - Math.max(pauseStartedAt, turn.startedAt))
+    const pausedMs = turn.pausedMs + openPauseMs
+    const effectiveMs = Math.max(0, durationMs - pausedMs)
     return {
       startedAt: turn.startedAt,
       durationMs,
-      pausedMs: turn.pausedMs,
+      pausedMs,
       effectiveMs,
       steps: turn.steps,
       retries: turn.retries,

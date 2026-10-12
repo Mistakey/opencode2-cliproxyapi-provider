@@ -177,7 +177,9 @@ const status = await client.rpc.call({ rpcID: "cliproxyapi", method: "status", i
 Until that reload the runtime still dispatches the previous directory, including
 its Fast setting, and the snapshot says so instead of claiming the new one is
 effective. The plugin does not hot-update the runtime itself: `location.reload()`
-is the host's public boundary.
+is the host's public boundary. A **new** request that would carry a Fast tier the
+saved directory has withdrawn is refused with a clear error until that reload,
+so a stale `service_tier` is never sent; a request already in flight is untouched.
 
 ## Transport, recovery and compaction
 
@@ -493,7 +495,11 @@ WebSocket and applies CPA's transcript state machine: `auto` selecting WebSocket
 from the directory preference and reusing one socket, the summary and native
 compaction paths (including the fresh socket after each), a refused upgrade, an
 invalid `previous_response_id`, an HTTP-only package asked for WebSocket,
-parallel sessions, a rotated credential and socket release on unload.
+parallel sessions, a rotated credential and socket release on unload. It also
+covers the two-phase apply boundary on both transports: an applied Fast request
+carries priority, a directory that withdraws the tier is reported as pending and
+a new request is refused instead of sending the withdrawn priority, and only the
+host's public location reload makes the withdrawal effective.
 
 ```bash
 bun run smoke:transport
