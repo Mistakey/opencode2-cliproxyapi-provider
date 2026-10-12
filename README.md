@@ -180,6 +180,9 @@ effective. The plugin does not hot-update the runtime itself: `location.reload()
 is the host's public boundary. A **new** request that would carry a Fast tier the
 saved directory has withdrawn is refused with a clear error until that reload,
 so a stale `service_tier` is never sent; a request already in flight is untouched.
+That check reads an in-memory registry shared by the plugin instances of this
+process, so it never depends on the cache having been written or read
+successfully.
 
 ## Transport, recovery and compaction
 
@@ -397,7 +400,12 @@ one credential's directory is never served to another.
   upstream still serves it.
 - Every refresh checks the connection generation and a request token before it
   commits, so a slow refresh from a replaced connection, a connection switch, or
-  an unload cannot overwrite newer state.
+  an unload cannot overwrite newer state. Directory commits are applied one at a
+  time in the order they were issued, so an older commit can neither publish nor
+  persist after a newer one; no repair write or republish is needed.
+- The cache is a startup optimization. A failed or slow cache write never
+  changes which directory or parameters are served, and no request-time decision
+  reads the cache.
 
 ## Reasoning, Fast and prices
 

@@ -26,6 +26,12 @@ const setup: Setup = async (ctx) => {
   await plugin.setup(ctx as Parameters<typeof plugin.setup>[0])
 }
 
+const deferred = () => {
+  let done!: () => void
+  const promise = new Promise<void>((resolve) => (done = resolve))
+  return { promise, done }
+}
+
 let mock: Awaited<ReturnType<typeof startMockCpa>> | undefined
 let priceMock: Awaited<ReturnType<typeof startMockCpa>> | undefined
 let host: FakeHost | undefined
@@ -286,6 +292,33 @@ describe("plugin setup", () => {
     const invalid = await handlers.setFast({ enabled: "yes" })
     expect(invalid.ok).toBe(false)
     expect(invalid.message).toContain("boolean")
+  })
+
+  test("refuses a second Fast change while one is still being applied", async () => {
+    mock = await startMockCpa({ models: [{ slug: "capable-model", service_tiers: ["priority"] }] })
+    host = createFakeHost({ options: { baseURL: mock.url, apiKey: API_KEY, modelsDev: false } })
+    await setup(host.ctx)
+    host.restoreConsole()
+
+    const entered = deferred()
+    const release = deferred()
+    const original = (host.ctx as { provider: { reload: () => Promise<void> } }).provider.reload
+    ;(host.ctx as { provider: { reload: () => Promise<void> } }).provider.reload = async () => {
+      entered.done()
+      await release.promise
+      await original()
+    }
+
+    const handlers = host.rpcRegistrations[0]?.handlers as {
+      setFast: (input: unknown) => Promise<{ ok: boolean; message?: string }>
+    }
+    const first = handlers.setFast({ enabled: true })
+    await entered.promise
+    const second = await handlers.setFast({ enabled: false })
+    expect(second.ok).toBe(false)
+    expect(second.message).toContain("in progress")
+    release.done()
+    expect((await first).ok).toBe(true)
   })
 
   test("attaches a models.dev price estimate without inventing one", async () => {

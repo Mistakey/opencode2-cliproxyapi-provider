@@ -21,7 +21,7 @@
 
 import { Model, Plugin, Provider } from "@opencode/plugin"
 import { DEFAULT_BASE_URL, AddressError, resolveEndpoints } from "./address"
-import { fastEffectiveCount, supportsFastServiceTier, toModelInfo, type CatalogEntry } from "./catalog"
+import { fastEffectiveCount, toModelInfo, type CatalogEntry } from "./catalog"
 import { connectionFingerprint, countStale, staleIds, type CatalogRecord } from "./catalog-cache"
 import { CatalogService, type CatalogIdentity } from "./catalog-service"
 import { createStorageCatalogStore, type CatalogStore, type StorageLike } from "./catalog-store"
@@ -139,6 +139,24 @@ function bindingSignature(input: ProviderBinding): string {
       .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)),
   })
 }
+
+/**
+ * Priority model ids per provider, shared by every plugin instance in this
+ * process. OpenCode can run a global and a location instance for the same
+ * provider, and the request hook may live on a different instance than the RPC
+ * that saved the directory. The registry hangs off `globalThis` under a symbol
+ * so it is shared even when the host loads the plugin as two module instances.
+ * Keeping the saved set in memory lets the hook see the newest saved directory
+ * without reading the cache, so a cache read or write failure can never change
+ * a wire parameter.
+ */
+const SAVED_PRIORITY_KEY = Symbol.for("opencode2-cliproxyapi-provider.saved-priority")
+const savedPriorityByProvider: Map<string, ReadonlySet<string>> = (() => {
+  const globalState = globalThis as unknown as { [SAVED_PRIORITY_KEY]?: Map<string, ReadonlySet<string>> }
+  globalState[SAVED_PRIORITY_KEY] ??= new Map()
+  return globalState[SAVED_PRIORITY_KEY]
+})()
+const EMPTY_PRIORITY: ReadonlySet<string> = new Set()
 
 /**
  * Keep one provider transform registered and republish the current binding.
@@ -349,11 +367,11 @@ async function setupConnection(ctx: Context) {
   // so there are no subscribers, and awaiting the event bus here would hold up
   // model registration. Announcements start once setup has finished.
   let announce = false
-  const publish = async (update: ConnectionUpdate, generation: number, owns?: () => boolean): Promise<void> => {
-    // A commit that lost ownership must not publish its snapshot over the newer
-    // one; the caller passes its own guard so the check is the same one it uses
-    // for the provider binding.
-    if (owns && !owns()) return
+  // One Fast change at a time: the preference write and the rebind are ordered,
+  // so two overlapping toggles cannot leave the saved preference and the
+  // effective setting disagreeing.
+  let fastChangeInProgress = false
+  const publish = async (update: ConnectionUpdate, generation: number): Promise<void> => {
     if (!state.commit(generation, update)) return
     if (!announce) return
     await registration?.events.emit("changed", state.read())
@@ -399,30 +417,15 @@ async function setupConnection(ctx: Context) {
     )
 
   /**
-   * Whether the newest saved directory and preference still call for priority
-   * on this model. The instance's own record is not enough: the host may keep an
-   * older generation alive for a session, so another generation can have saved a
-   * directory that withdrew the tier. The persisted cache is the shared truth
-   * across generations, so a request only passes when both agree. A model that is
-   * gone is retained as stale with its declared capability.
+   * Model ids the newest saved directory and preference currently ask for
+   * priority, for this connection, as committed by any instance of this
+   * process. The cache is only a startup optimization, so this never reads
+   * storage.
    */
-  const shouldSendPriority = async (modelID: string): Promise<boolean> => {
-    if (!fastEnabled) return false
-    const record = service.current()
-    if (!record) return false
-    const declared = (entries: CatalogRecord | undefined): boolean =>
-      entries !== undefined &&
-      entries.models.some((state) => state.entry.id === modelID && supportsFastServiceTier(state.entry))
-    if (!declared(record)) return false
-    if (record.fingerprint === "") return true
-    try {
-      const saved = await store.load(record.fingerprint)
-      if (saved) return declared(saved)
-    } catch {
-      // A storage read that fails must not turn into a wrong priority: fall back
-      // to the instance's own record.
-    }
-    return true
+  const savedPriorityModels = (): ReadonlySet<string> => {
+    const fingerprint = service.current()?.fingerprint
+    if (!fingerprint) return EMPTY_PRIORITY
+    return savedPriorityByProvider.get(`${String(providerID)}\n${fingerprint}`) ?? EMPTY_PRIORITY
   }
 
   /**
@@ -456,7 +459,6 @@ async function setupConnection(ctx: Context) {
    */
   const applyBinding = async (
     record: CatalogRecord,
-    owns?: () => boolean,
   ): Promise<
     | {
         pending: boolean
@@ -472,9 +474,13 @@ async function setupConnection(ctx: Context) {
     const policy = policyFor(record.models.map((state) => state.entry))
     const compaction = compactionFor(policy)
     const { connection, matches } = await activeConnectionFor(record)
-    // A newer commit or a connection change may have landed while this bind was
-    // being prepared; the newest commit owns the provider registry.
-    if (!matches || (owns && !owns())) return undefined
+    // A connection change while this bind was being prepared invalidates it.
+    if (!matches) return undefined
+    const priority = priorityModels(models)
+    // The newest saved directory and preference for this connection, visible to
+    // every instance's request hook. A pending bind leaves the compiled applied
+    // set alone; the saved set always follows the newest commit.
+    savedPriorityByProvider.set(`${String(providerID)}\n${record.fingerprint}`, fastEnabled ? priority : EMPTY_PRIORITY)
     const bound = await binder.bind({
       providerID,
       providerName: explicit.providerName,
@@ -486,9 +492,9 @@ async function setupConnection(ctx: Context) {
       models,
       ...(connection ? { sourceConnection: connection } : {}),
     })
-    if (!bound.pending && (!owns || owns())) {
+    if (!bound.pending) {
       appliedFastEffectiveModels = recordStats(record, models).fastEffectiveModels
-      appliedPriorityModels = priorityModels(models)
+      appliedPriorityModels = priority
     }
     if (policy.note) console.warn(`[${PLUGIN_ID}] transport: ${policy.note}`)
     if (compaction.note) console.warn(`[${PLUGIN_ID}] compaction: ${compaction.note}`)
@@ -528,8 +534,8 @@ async function setupConnection(ctx: Context) {
         signal,
       }),
     ...(explicit.catalogStaleTtlMs !== undefined ? { staleTtlMs: explicit.catalogStaleTtlMs } : {}),
-    onCommit: async ({ generation, record, kind, owns }) => {
-      const applied = await applyBinding(record, owns)
+    onCommit: async ({ generation, record, kind }) => {
+      const applied = await applyBinding(record)
       if (!applied) return
       const { pending, models, policy, compaction } = applied
       await publish(
@@ -554,7 +560,6 @@ async function setupConnection(ctx: Context) {
           costModels: recordStats(record, models).costModels,
         },
         generation,
-        owns,
       )
       if (notifiedStale !== undefined && !service.isStale(notifiedStale)) notifiedStale = undefined
     },
@@ -756,17 +761,20 @@ async function setupConnection(ctx: Context) {
       if (enabled === undefined) {
         return { ok: false, message: "enabled must be a boolean", snapshot: state.read() }
       }
+      if (fastChangeInProgress) {
+        return { ok: false, message: "a Fast change is already in progress", snapshot: state.read() }
+      }
       if (enabled !== fastEnabled) {
-        fastEnabled = enabled
+        fastChangeInProgress = true
         try {
-          await writeFastPreference(ctx.storage, fastKey, enabled)
-        } catch (error) {
-          const detail = error instanceof Error ? error.message : String(error)
-          console.warn(`[${PLUGIN_ID}] could not persist the Fast preference: ${detail}`)
-        }
-        const record = service.current()
-        if (record) {
-          const applied = await applyBinding(record)
+          fastEnabled = enabled
+          try {
+            await writeFastPreference(ctx.storage, fastKey, enabled)
+          } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error)
+            console.warn(`[${PLUGIN_ID}] could not persist the Fast preference: ${detail}`)
+          }
+          const applied = await service.rebind((record) => applyBinding(record))
           if (applied) {
             const { pending } = applied
             await publish(
@@ -782,9 +790,8 @@ async function setupConnection(ctx: Context) {
             state.patch({ fastEnabled })
             await registration?.events.emit("changed", state.read())
           }
-        } else {
-          state.patch({ fastEnabled })
-          await registration?.events.emit("changed", state.read())
+        } finally {
+          fastChangeInProgress = false
         }
       }
       return { ok: true, snapshot: state.read() }
@@ -839,8 +846,9 @@ async function setupConnection(ctx: Context) {
       // still carry the withdrawn priority until the location reloads. Refuse
       // that new dispatch rather than send a parameter the directory no longer
       // declares; a request already in flight passed this hook and is untouched.
+      // The check reads the in-memory saved directory only.
       const modelID = (input as { model?: { id?: unknown } }).model?.id
-      if (typeof modelID === "string" && appliedPriorityModels.has(modelID) && !(await shouldSendPriority(modelID))) {
+      if (typeof modelID === "string" && appliedPriorityModels.has(modelID) && !savedPriorityModels().has(modelID)) {
         throw new Error(
           `CLIProxyAPI: the saved directory no longer declares the service tier for '${modelID}', ` +
             `but the running runtime still asks for it. Reload the location before using this model.`,
