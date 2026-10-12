@@ -36,10 +36,12 @@ Delivered here:
   and dropped only after the retention window (seven days by default, measured
   from the first miss); requesting a retained model warns instead of promising
   the upstream still serves it
-- automatic recovery: after a failed read, or one that still retains stale
-  models, the plugin retries on a simple backoff (60s, then 1.5x up to a 300s
-  ceiling) until the directory is fresh again; a manual refresh, a connection
-  switch or unload cancels the pending retry
+- automatic recovery: a later background or manual read that fails, or one that
+  still retains stale models, schedules a simple backoff retry (60s, then 1.5x up
+  to a 300s ceiling) until the directory is fresh again; the very first
+  no-cache boot read is **not** retried (matching the reference plugin's
+  force-refresh-only rule), and a manual refresh, a connection switch or unload
+  cancels the pending retry
 - reasoning variants taken only from the declared `supported_reasoning_levels`,
   carried into requests through the v2 semantic `reasoningEffort` setting
 - a durable, provider-scoped **Fast** preference: off by default, toggled over
@@ -422,7 +424,12 @@ one credential's directory is never served to another.
   retries on its own on the reference plugin's simple schedule: a first delay of
   60 seconds, growing 1.5x per attempt up to a five-minute ceiling. A fresh
   directory clears the schedule; a manual refresh, a connection switch and
-  unload cancel a pending retry. Each retry is the same bounded directory
+  unload cancel a pending retry. The boundary matches the reference plugin's
+  force-refresh rule: a location that boots without a matching cache and whose
+  **first** read fails does not auto-retry — only a later background or manual
+  read that fails (or a successful read that still retains stale models)
+  schedules recovery, so an instance that started against a down CPA waits for a
+  manual refresh or a cached restart. Each retry is the same bounded directory
   request, so an outer caller still limits the real GET; the plugin adds no
   coordinator, no persistent polling and no snapshot machinery.
 
