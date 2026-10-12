@@ -240,6 +240,7 @@ describe("native Responses runtime against the mock CPA", () => {
 
   test("keeps a reverse proxy subpath on both the directory and the response request", async () => {
     mock = await startMockCpa({
+      basePath: "/cpa",
       models: [{ slug: "gpt-5.2-codex", display_name: "GPT-5.2 Codex" }],
       responses: textReply("pong behind the proxy"),
     })
@@ -261,6 +262,21 @@ describe("native Responses runtime against the mock CPA", () => {
     expect(request.headers.authorization).toBe(`Bearer ${API_KEY}`)
     expect(request.json.model).toBe("gpt-5.2-codex")
     expect(events.some((event) => event.type === "text-delta")).toBe(true)
+  })
+
+  test("rejects a Responses request that drops the /v1 segment", async () => {
+    mock = await startMockCpa({ responses: textReply("pong") })
+
+    // The address regression this mock must catch: a client that appends
+    // `/responses` to the origin root instead of to `{root}/v1`.
+    const wrong = await fetch(`${mock.url}/responses`, { method: "POST", body: "{}" })
+    expect(wrong.status).toBe(404)
+    expect(mock.responses()).toHaveLength(1)
+    expect(mock.responses()[0]!.path).toBe("/responses")
+
+    const right = await fetch(`${mock.url}/v1/responses`, { method: "POST", body: "{}" })
+    expect(right.status).toBe(200)
+    expect(mock.responses()).toHaveLength(2)
   })
 
   test("surfaces a provider error instead of an empty result", async () => {

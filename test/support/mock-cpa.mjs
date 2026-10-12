@@ -2,10 +2,15 @@
 // run. Plain ESM with no dependencies so `bun` and `node` can both run it.
 //
 // It implements just enough of the CPA surface this slice touches:
-//   GET  /v1/models?client_version=...  -> enhanced directory or plain listing
-//   POST /v1/responses                  -> Responses SSE
+//   GET  {basePath}/v1/models?client_version=...  -> enhanced directory or plain listing
+//   POST {basePath}/v1/responses                  -> Responses SSE
 // Every request is recorded so a test can assert on the wire, not on a mock
 // client object.
+//
+// The two routes are matched on their exact path, not on a suffix: a client
+// that drops the `/v1` segment (or invents another one) gets a 404 instead of
+// being silently accepted, so a regression in address normalization is visible
+// on the wire. `basePath` models a reverse-proxy subpath.
 
 import { createServer } from "node:http"
 
@@ -130,6 +135,10 @@ export async function startMockCpa(options = {}) {
   const requests = []
   const directoryReply = options.directory ?? { status: 200, body: { models: options.models ?? [] } }
   const responsesReply = options.responses ?? (() => textReply("pong"))
+  const rawBasePath = typeof options.basePath === "string" ? options.basePath.trim().replace(/\/+$/, "") : ""
+  const basePath = rawBasePath === "" || rawBasePath.startsWith("/") ? rawBasePath : `/${rawBasePath}`
+  const modelsPath = `${basePath}/v1/models`
+  const responsesPath = `${basePath}/v1/responses`
 
   const server = createServer((req, res) => {
     const chunks = []
@@ -154,11 +163,11 @@ export async function startMockCpa(options = {}) {
       }
       requests.push(record)
 
-      if (req.method === "GET" && url.pathname.endsWith("/models")) {
+      if (req.method === "GET" && url.pathname === modelsPath) {
         sendReply(res, await (typeof directoryReply === "function" ? directoryReply(record) : directoryReply))
         return
       }
-      if (req.method === "POST" && url.pathname.endsWith("/responses")) {
+      if (req.method === "POST" && url.pathname === responsesPath) {
         const index = requests.filter((entry) => entry.method === "POST").length - 1
         sendReply(res, await (typeof responsesReply === "function" ? responsesReply(record, index) : responsesReply))
         return

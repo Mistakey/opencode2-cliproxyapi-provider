@@ -108,6 +108,18 @@ async function main() {
       first.code === 0 && mock.state.upgrades >= 1 && mock.state.frames.length >= 1,
       `exit ${first.code}, upgrades=${mock.state.upgrades}, frames=${mock.state.frames.length}`,
     )
+    const handshakeUrl = mock.state.handshakes.at(-1)?.url
+    let handshakePath
+    try {
+      handshakePath = typeof handshakeUrl === "string" ? new URL(handshakeUrl).pathname : undefined
+    } catch {
+      handshakePath = undefined
+    }
+    record(
+      "the WebSocket handshake used the normalized /v1/responses path",
+      handshakePath === "/v1/responses",
+      String(handshakeUrl),
+    )
     const wsStats = (await stats("ses_ws_first")).stats
     record(
       "the WebSocket session carries stats",

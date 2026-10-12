@@ -47,6 +47,8 @@ export declare function toolCallReply(options: {
 
 export declare function startMockCpa(options?: {
   models?: readonly Record<string, unknown>[]
+  /** Reverse-proxy subpath the mock is mounted at, e.g. `/cpa`. */
+  basePath?: string
   directory?: Reply | ((request: RecordedRequest) => Reply | Promise<Reply>)
   responses?: Reply | ((request: RecordedRequest, index: number) => Reply | Promise<Reply>)
 }): Promise<MockCpa>

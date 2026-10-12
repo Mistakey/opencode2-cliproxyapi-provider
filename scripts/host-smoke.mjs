@@ -266,10 +266,22 @@ async function main() {
       Boolean(directory?.query.client_version?.startsWith("opencode2-cliproxyapi-provider/")),
     )
     record("directory request carried the bearer key", directory?.headers.authorization === `Bearer ${FAKE_KEY}`)
+    const directoryPaths = mock.requests.filter((request) => request.method === "GET").map((request) => request.path)
+    record(
+      "every directory request used the exact /v1/models path",
+      directoryPaths.length > 0 && directoryPaths.every((path) => path === "/v1/models"),
+      directoryPaths.join(","),
+    )
 
     const primary = mock.responses().find((request) => !requestText(request).includes("title generator"))
     record("primary request kept the real CPA model id", primary?.json?.model === MODEL_ID, String(primary?.json?.model))
     record("primary request carried the bearer key", primary?.headers.authorization === `Bearer ${FAKE_KEY}`)
+    const responsesPaths = mock.responses().map((request) => request.path)
+    record(
+      "every Responses request used the exact /v1/responses path",
+      responsesPaths.length > 0 && responsesPaths.every((path) => path === "/v1/responses"),
+      responsesPaths.join(","),
+    )
 
     const toolResult = mock.responses().find((request) => requestText(request).includes('"function_call_output"'))
     record("tool call result was sent back to CPA", Boolean(toolResult))
@@ -532,7 +544,7 @@ async function main() {
           : String(body.instructions ?? "").includes("title generator")
             ? "title"
             : "primary"
-      console.log(`      [${index}] ${marker} input=${Array.isArray(body.input) ? body.input.length : 0} items`)
+      console.log(`      [${index}] ${marker} ${request.method} ${request.path} input=${Array.isArray(body.input) ? body.input.length : 0} items`)
       if (process.env.SMOKE_DEBUG) console.log(`          ${JSON.stringify(body.input).slice(0, 2000)}`)
     }
 
