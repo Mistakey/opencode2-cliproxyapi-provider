@@ -194,7 +194,7 @@ describe("CPA connection RPC", () => {
     expect(result.snapshot.verified).toBe("ok")
 
     expect(host.connectCalls.map((call) => call.key)).toEqual([API_KEY, newKey])
-    expect(host.connectCalls[1]?.answer).toEqual({ baseURL: mock.url })
+    expect(host.connectCalls[1]?.answer).toEqual({ address: mock.url })
 
     // The provider record is replaced, so the old directory cannot leak through.
     expect(host.providers).toHaveLength(1)

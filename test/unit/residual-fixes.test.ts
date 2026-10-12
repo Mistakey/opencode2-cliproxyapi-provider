@@ -70,14 +70,14 @@ describe("F02 the native save is the connect transaction's commit point", () => 
       await rpc.refresh!()
       const provider = host.providers[0] as any
       const value = host.credentials.find((credential) => credential.id === provider.sourceConnection.id)!.value
-      expect(provider.info.settings.baseURL).toBe(`${value.configuration!.baseURL}/v1`)
+      expect(provider.info.settings.baseURL).toBe(`${value.configuration!.address}/v1`)
       expect((await rpc.status!()).address).toBe(a.url)
 
       release.done()
       await connect
       const saved = host.providers[0] as any
       const savedCredential = host.credentials.find((credential) => credential.id === saved.sourceConnection.id)!.value
-      expect(saved.info.settings.baseURL).toBe(`${savedCredential.configuration!.baseURL}/v1`)
+      expect(saved.info.settings.baseURL).toBe(`${savedCredential.configuration!.address}/v1`)
       expect((await rpc.status!()).address).toBe(b.url)
     })
   })
@@ -124,8 +124,8 @@ describe("F02 the native save is the connect transaction's commit point", () => 
         const value = host.credentials.find((credential) => credential.id === provider.sourceConnection.id)!.value
         const snapshot = await rpc.status!()
         expect(firstResult.ok).toBe(true)
-        expect(snapshot.address).toBe(value.configuration!.baseURL)
-        expect(provider.info.settings.baseURL).toBe(`${value.configuration!.baseURL}/v1`)
+        expect(snapshot.address).toBe(value.configuration!.address)
+        expect(provider.info.settings.baseURL).toBe(`${value.configuration!.address}/v1`)
       })
     } finally {
       await bad.close()

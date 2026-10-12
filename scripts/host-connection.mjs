@@ -182,7 +182,7 @@ async function main() {
     const integrations = await client.integration.list(at(HOME_DIR))
     const cliproxyapi = integrations.data.find((entry) => entry.id === PROVIDER_ID)
     const keyMethod = cliproxyapi?.methods.find((method) => method.type === "key")
-    const addressField = keyMethod?.form?.find((field) => field.key === "baseURL")
+    const addressField = keyMethod?.form?.find((field) => field.key === "address")
     record("host shows the CPA integration with a native key method", Boolean(keyMethod), cliproxyapi?.name)
     record(
       "the native key form carries the CPA address field",
@@ -195,7 +195,7 @@ async function main() {
     await client.integration.connect.key({
       integrationID: PROVIDER_ID,
       key: WRONG_KEY,
-      answer: { baseURL: mockA.url },
+      answer: { address: mockA.url },
       ...at(HOME_DIR),
     })
     await reload()
@@ -209,7 +209,7 @@ async function main() {
     await client.integration.connect.key({
       integrationID: PROVIDER_ID,
       key: KEY_A,
-      answer: { baseURL: mockA.url },
+      answer: { address: mockA.url },
       ...at(HOME_DIR),
     })
     await reload()

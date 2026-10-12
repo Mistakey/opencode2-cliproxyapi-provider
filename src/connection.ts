@@ -173,7 +173,7 @@ export function readCredential<Connection>(
   if (!credential || credential.type !== "key") return undefined
   const key = credential.key.trim()
   if (!key) return undefined
-  const configured = credential.configuration?.baseURL
+  const configured = credential.configuration?.address
   const baseURL = typeof configured === "string" && configured.trim() ? configured.trim() : undefined
   return { connection, key, baseURL }
 }

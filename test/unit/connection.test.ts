@@ -186,7 +186,7 @@ describe("readCredential", () => {
     const resolved = readCredential({ type: "credential", id: "cred_1" }, {
       type: "key",
       key: "sk-fake",
-      configuration: { baseURL: "http://stored.test" },
+      configuration: { address: "http://stored.test" },
     })
     expect(resolved).toEqual({
       connection: { type: "credential", id: "cred_1" },

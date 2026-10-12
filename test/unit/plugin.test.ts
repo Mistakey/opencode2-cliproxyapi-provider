@@ -70,7 +70,7 @@ describe("plugin setup", () => {
         form: [
           {
             type: "string",
-            key: "baseURL",
+            key: "address",
             title: "Address",
             description: "CPA address, including any reverse proxy subpath",
             placeholder: "http://127.0.0.1:8317",
@@ -82,7 +82,7 @@ describe("plugin setup", () => {
 
     expect(host.connectCalls).toHaveLength(1)
     expect(host.connectCalls[0]?.key).toBe(API_KEY)
-    expect(host.connectCalls[0]?.answer).toEqual({ baseURL: mock.url })
+    expect(host.connectCalls[0]?.answer).toEqual({ address: mock.url })
 
     const provider = host.providers[0] as {
       info: Record<string, unknown>

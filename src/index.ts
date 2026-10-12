@@ -61,7 +61,17 @@ interface CpaRegistration {
   readonly dispose: () => Promise<void>
 }
 
-/** Register (or rename) the CPA integration and its native key + address form. */
+/**
+ * Register (or rename) the CPA integration and its native key + address form.
+ *
+ * The address field is deliberately keyed `address`, not `baseURL`: the host
+ * merges a key credential's saved form answers into the provider settings, so a
+ * field named `baseURL` would overwrite the plugin's normalized inference
+ * endpoint (`{root}/v1`) with the raw address the user typed. Keeping the raw
+ * address under its own key leaves the final endpoint to the plugin, matching
+ * the reference plugin, which stores the user's address separately and resolves
+ * the inference base URL from it.
+ */
 async function registerIntegration(
   ctx: Context,
   explicit: ExplicitConfig,
@@ -79,7 +89,7 @@ async function registerIntegration(
         form: [
           {
             type: "string",
-            key: "baseURL",
+            key: "address",
             title: "Address",
             description: "CPA address, including any reverse proxy subpath",
             placeholder: DEFAULT_BASE_URL,
@@ -693,7 +703,7 @@ async function setupConnection(ctx: Context) {
         // the credential store, the served directory and the snapshot would
         // disagree. A save that fails leaves the previous connection untouched.
         try {
-          await ctx.integration.connect.key({ integrationID, key, answer: { baseURL: address } })
+          await ctx.integration.connect.key({ integrationID, key, answer: { address } })
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error)
           return {
@@ -916,7 +926,7 @@ async function setupConnection(ctx: Context) {
     await ctx.integration.connect.key({
       integrationID,
       key: plan.key,
-      answer: { baseURL: plan.address },
+      answer: { address: plan.address },
     })
   }
 
