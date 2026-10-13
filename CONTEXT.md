@@ -1,6 +1,6 @@
 # OpenCode v2 CPA provider
 
-本项目开发 OpenCode v2 的 CLIProxyAPI provider 插件，尽量对齐 CPA 官方 Pi 插件的功能，按 v2 的机制实现。切片已实现，并在隔离的 `@opencode/cli` 2.0.26 宿主上用 loopback mock CPA 与虚构凭证验证；真实 CPA 联调与费用仍待人工授权，独立复查与最终验收尚未完成。
+本项目是 OpenCode v2 的 CLIProxyAPI provider 插件，以 CPA 官方 Pi 插件为功能基准，按 v2 的机制实现。`0.1.0` 已完成实现及用户约定的简单功能验收；已测宿主为 `2.0.26`，真实 CPA 与离线/mock 的具体覆盖和未测边界见 [README](README.md#accepted-verification-scope)，不代表所有模型、native 或未来版本均已验证。
 
 ## Language
 
@@ -23,7 +23,7 @@ _Avoid_: 软件自带压缩、普通压缩
 
 **stale 模型**：同一连接此前发现、当前目录暂时缺失而在保留窗口内的模型；仍在列表不表示上游此刻可调用。
 
-**生效边界（apply boundary）**：插件保存并验证连接与目录，与运行时真正按新目录分发请求之间的边界。宿主在 location boot/reload 时编译 provider registry，所以未 reload 前 snapshot 报 `reloadRequired: true`、`applied: false`，运行时仍按已应用的目录与参数分发；TUI 自动 reload，无界面调用方读该标志后调用宿主公开的 location reload 再确认。
+**生效边界（apply boundary）**：连接、目录和 Fast 偏好的保存/验证，与运行时实际按新 binding 分发请求之间的边界，以 `applied` / `reloadRequired` 表达。已有 binding 的变更需宿主 location reload；空 binding 首次成功接入可立即生效，具体契约与理由见 [ADR 0002](docs/adr/0002-apply-boundary.md)。
 _Avoid_: 把可见模型列表更新等同于运行时已生效
 
 ## Relationships

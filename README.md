@@ -8,9 +8,15 @@ Responses runtime** talk to CPA over HTTP/SSE or WebSocket. It is not a port of
 the official Pi plugin and does not re-implement serialization, streaming or
 compaction.
 
-## Status of this slice
+## Delivery status
 
-Delivered here:
+Version `0.1.0` is delivered as a source checkout for OpenCode `2.0.26`.
+Implementation, fixed-tree independent reviews and the user's agreed simple
+functional acceptance are recorded under Epic `oc2cpa-bya`. Historical review
+BLOCKs remain historical BLOCKs; subsequent targeted fixes and their checks do
+not imply a new full review of every later build.
+
+Delivered capabilities:
 
 - explicit (no-UI) and interactive CPA address and key -> enhanced directory ->
   OpenCode model registration -> native Responses HTTP/SSE, including tool
@@ -66,7 +72,38 @@ Delivered here:
   upgrades, parallel sessions, credential rotation and socket release on unload
 - project scaffolding, tests, isolated host scripts and this document
 
-Not part of this slice (later tasks): real CPA validation.
+### Accepted verification scope
+
+Real CPA checks used OpenCode `2.0.26`, plugin `0.1.0` at `11eb30e`, and only
+`gpt-6.1-sol` (low reasoning for the final combinations). The CPA server version
+was not established. `16afc4b` subsequently fixes one pause-accounting event-order
+issue, verified by an offline clock replay and a fictional-key host check; it
+was **not** re-tested as a full real-CPA build.
+
+| Requirement | Existing offline / isolated-host evidence | Real CPA observation and boundary |
+| --- | --- | --- |
+| A1 — connection | Native form, masked wizard, explicit verify pair, saved/verified/apply states and credential isolation (`.2`, `.18`, `.19`) | Directory authentication, native saved connection and reload state observed |
+| A2 — models | Directory mapping, hidden entries, limits, modalities and variants (`.1`, `.4`) | One model ID and one synthetic image observed; not an all-model compatibility claim |
+| A3 — Fast | Capability gate, HTTP/WS serialization, persistence, write failure and reference prices (`.5`, `.21`) | WS priority + low observed; final off save/reload observed, **no subsequent off model request**; real price lookup was disabled |
+| A4 — catalog | Matching cache, refresh ordering, stale retention and simple recovery (`.4`, `.16`, `.21`) | Directory reads observed; no real outage/stale matrix |
+| A5 — requests | Native HTTP/SSE and WS, tools, continuation and recovery (`.1`, `.3`) | HTTP/WS tool content, same-socket incremental turns, one image and normal reconnect observed |
+| A6 — compaction | Summary continuation and mock native checkpoint (`.3`) | HTTP summary and WS follow-up with a new socket and old raw/tool context removed observed; **native not tried** |
+| A7 — pause | Cancellable gate, provider scope and reload/unload cleanup (`.6`) | WS wait/resume and cancellation without a model frame observed |
+| A8 — UI/stats | RPC/TUI module, location/session isolation and usage accounting (`.2`, `.6`) | RPC/reconnect and TUI module rendering observed, **not a physical TUI walkthrough**; pause overlap fixed offline at `16afc4b` (`.9`) |
+
+The final acceptance conclusion is `.9`, completion
+`completion-57592bd77105e265992e9d74990ed869724395a9`, with material
+`cbf4fb5b22ca598f1fb85f46422aa920` revision 2. It retains the `11eb30e` real
+observations and the `16afc4b` offline delta separately. All original failures,
+raw records and sealed runs remain available; a prior WS failure was traced to
+missing authentication in the temporary test proxy, not a production WS defect.
+No extra real requests were made for closeout, and no push, npm publication or
+installation into the user's existing environment is part of this delivery.
+
+Long-term decisions are in [ADR 0001](docs/adr/0001-native-runtime.md) and
+[ADR 0002](docs/adr/0002-apply-boundary.md); terms are in [CONTEXT.md](CONTEXT.md).
+The completed design snapshot remains in Git at `8bc28d0` and in Epic history,
+not as a live spec.
 
 ## Requirements
 
@@ -236,6 +273,10 @@ treat the compacted transcript as a new conversation. Ordinary turns keep
 reusing their socket.
 
 ### Native compaction (opt-in)
+
+Native is optional and **not verified against real CPA in this delivery**. The
+checkpoint path below was checked with the host and a loopback mock only; it is
+not a guarantee for the tested real model or any deployment.
 
 `compaction: "native"` declares OpenCode's provider-side compaction instead of
 the default `"summary"`. It is only declared when the selected runtime package
@@ -603,7 +644,7 @@ Development dependencies are locked with `package-lock.json`; `bun` runs the
 tests and the host scripts against that `node_modules`.
 
 ```bash
-npm ci                 # install the locked development dependencies
+npm ci --cache .forge/local/npm-cache --no-audit --no-fund  # locked, worktree-local cache
 bun test               # unit + native-runtime integration tests
 bun test test/unit     # directory parsing, mapping, cache/stale, prices, Fast, transport, connection, state, RPC, pause, stats, TUI
 bun test test/integration   # real Responses serialization, SSE parsing and the WebSocket channel
@@ -662,7 +703,19 @@ remote client and as a catalog reader.
   RPC event plus the TUI status, not a disabled model. The retention window is
   seven days by default and is shortened through `catalogStaleTtlMs` in the
   isolated host run.
-- No real CPA deployment has been contacted. Tool round-trips, image input,
-  summary compaction, the connection experience, the catalog cache/refresh/stale
-  behaviour, the Fast parameter and the price estimate were validated against a
-  mock CPA that speaks the same Responses and directory wire format.
+- Real CPA coverage is limited to the [accepted verification scope](#accepted-verification-scope)
+  above. The broader failure/recovery, catalog and pricing cases remain mock or
+  isolated-host evidence, not a real-deployment matrix. Earlier intermittent
+  test failures/timeouts whose causes were not established are not reclassified
+  as proven environment problems.
+
+## Troubleshooting
+
+| Observation | What to check |
+| --- | --- |
+| Saved credential but unverified/offline snapshot | Saving is not validation. Use `/cpa-status`; `/cpa-connect` verifies an explicit address/key pair before replacing it. RPC `verify` also requires both fields and never borrows the active key. |
+| `reloadRequired: true`, or a withdrawn Fast tier is refused | Apply through the host's public `location.reload()` and re-read `status`; the TUI does this automatically. Reload cancels a paused request and clears in-memory stats. |
+| First boot had no cache and the directory was unavailable | This initial read is not auto-retried. Once CPA is available, use `/cpa-refresh` or reconnect; later failed background/manual reads use the documented recovery schedule. |
+| Requested WS but got HTTP/SSE | Check `transportNote` and the selected runtime package. Host fallback is not proof that a WebSocket exchange succeeded. |
+| Native is unavailable or untested | Leave the default summary mode. Read `compactionNote`; mock checkpoint success is not real-CPA native support. |
+| Duration/TPS differs from provider latency or billing | Stats cover the whole host turn minus actual pause-gate waiting; prices are references, not measured decode speed or a CPA bill. |
