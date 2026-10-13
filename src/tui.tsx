@@ -188,7 +188,7 @@ export default Plugin.define({
         {
           id: "cliproxyapi.status",
           title: "CLIProxyAPI connection status",
-          description: "Show the CPA address, saved credential and verification state",
+          description: "Show the CPA connection, selected transport, compaction and pending settings",
           group: "CLIProxyAPI",
           palette: true,
           slash: { name: "cpa-status" },

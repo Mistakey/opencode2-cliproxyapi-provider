@@ -134,7 +134,7 @@ function formatTime(value: number | undefined): string {
 
 /** Short footer text; "saved" and "verified" are deliberately different states. */
 export function describeConnection(snapshot: ConnectionSnapshot | undefined, connected: boolean): string {
-  if (!connected) return "CPA offline"
+  if (!connected) return "OpenCode RPC offline"
   if (!snapshot) return "CPA not configured"
   const models = snapshot.catalogModels
   let connection: string
@@ -169,14 +169,21 @@ export function describeDetail(
   lastError: string | undefined,
   pause?: PauseState | undefined,
 ): string {
-  if (!connected) return `CPA server unreachable over RPC${lastError ? `: ${lastError}` : ""}`
-  if (!snapshot) return "CPA is not configured at this location"
+  if (!connected) {
+    return `OpenCode server unreachable over RPC${lastError ? `: ${lastError}` : ""}\nCPA connection status is unknown until RPC reconnects.`
+  }
+  if (!snapshot) return "OpenCode RPC: connected\nCPA is not configured at this location"
   const lines = [
+    "OpenCode RPC: connected",
     `address: ${snapshot.address ?? "(none)"} (from ${snapshot.addressSource ?? "unknown"})`,
     `key: ${snapshot.keyHint} (from ${snapshot.keySource ?? "unknown"})`,
     `saved: ${snapshot.keySaved ? "yes" : "no"}`,
     `verified: ${snapshot.verified === "failed" && snapshot.verifyKind ? `failed (${snapshot.verifyKind})` : snapshot.verified}`,
-    `apply: ${snapshot.reloadRequired === true ? "reload required before the runtime dispatches this directory" : "live in the runtime"}`,
+    `apply: ${snapshot.reloadRequired === true || snapshot.applied === false
+      ? "reload required before the runtime dispatches the saved settings"
+      : snapshot.applied === true ? "live in the runtime" : "(unknown)"}`,
+    `transport (selected): ${snapshot.transport ?? "(unknown)"} (from ${snapshot.transportSource ?? "unknown"}; not a connection-success check)`,
+    `compaction: ${snapshot.compaction ?? "(unknown)"}`,
     `models: ${snapshot.catalogModels ?? "(unknown)"}`,
     `last refresh: ${formatTime(snapshot.catalogFetchedAt)}${snapshot.catalogFromCache ? " (from cache)" : ""}`,
     `stale: ${snapshot.catalogStaleModels ?? 0}${snapshot.catalogStaleIds?.length ? ` (${snapshot.catalogStaleIds.join(", ")})` : ""}`,
@@ -185,6 +192,8 @@ export function describeDetail(
     `requests: ${describePause(pause)}`,
     `generation: ${snapshot.generation}`,
   ]
+  if (snapshot.transportNote) lines.push(`transport note: ${snapshot.transportNote}`)
+  if (snapshot.compactionNote) lines.push(`compaction note: ${snapshot.compactionNote}`)
   if (snapshot.verifyMessage) lines.push(`detail: ${snapshot.verifyMessage}`)
   return lines.join("\n")
 }
@@ -208,8 +217,9 @@ export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return "?"
   if (ms < 1000) return `${Math.round(ms)}ms`
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
-  const minutes = Math.floor(ms / 60_000)
-  const seconds = Math.round((ms % 60_000) / 1000)
+  const roundedSeconds = Math.round(ms / 1000)
+  const minutes = Math.floor(roundedSeconds / 60)
+  const seconds = roundedSeconds % 60
   return `${minutes}m${seconds.toString().padStart(2, "0")}s`
 }
 

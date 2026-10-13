@@ -122,6 +122,18 @@ describe("stats formatting", () => {
     )
   })
 
+  test("carries rounded seconds into minutes without changing the recorded duration", () => {
+    expect(formatDuration(119_499)).toBe("1m59s")
+    expect(formatDuration(119_500)).toBe("2m00s")
+    expect(formatDuration(119_600)).toBe("2m00s")
+    expect(formatDuration(179_600)).toBe("3m00s")
+    expect(formatDuration(3_599_600)).toBe("60m00s")
+    expect(formatDuration(60_000)).toBe("1m00s")
+    expect(formatDuration(-1)).toBe("?")
+    expect(formatDuration(Number.NaN)).toBe("?")
+    expect(formatDuration(Number.POSITIVE_INFINITY)).toBe("?")
+  })
+
   test("describes pause, the turn and the footer without claiming decode speed", () => {
     expect(describePause(undefined)).toBe("unknown")
     expect(describePause({ paused: false, changedAt: 0, waiting: 0, scope: "location" })).toBe("running")

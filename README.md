@@ -36,11 +36,11 @@ Install the plugin through OpenCode, specifying the version:
 
 ```sh
 opencode --version
-opencode plugin add opencode2-cliproxyapi-provider@0.1.0
+opencode plugin add opencode2-cliproxyapi-provider@0.1.1
 opencode plugin list
 ```
 
-This keeps the plugin at `0.1.0` until you choose to upgrade. You do not need
+This keeps the plugin at `0.1.1` until you choose to upgrade. You do not need
 `npm install -g` or a local copy of this repository.
 
 You can also add it to the `plugins` array in your existing `opencode.json(c)`:
@@ -48,7 +48,7 @@ You can also add it to the `plugins` array in your existing `opencode.json(c)`:
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode2-cliproxyapi-provider@0.1.0"]
+  "plugins": ["opencode2-cliproxyapi-provider@0.1.1"]
 }
 ```
 
@@ -79,7 +79,7 @@ connection unchanged. Do not commit config files containing API keys to Git.
 | Command | Description |
 | --- | --- |
 | `/cpa-connect` | Check and save a CPA address and API key |
-| `/cpa-status` | Show the connection, model list, Fast mode and transport settings |
+| `/cpa-status` | Show the connection, model list, Fast mode, selected transport, compaction and pending settings |
 | `/cpa-refresh` | Refresh the model list and apply any changes |
 | `/cpa-fast` | Turn Fast mode on or off; the setting is saved between restarts |
 | `/cpa-pause` | Pause new CPA requests; requests already sent continue normally |
@@ -89,6 +89,11 @@ connection unchanged. Do not commit config files containing API keys to Git.
 The footer shows the connection status and statistics for the last turn.
 Fast mode sends `priority` only for models that advertise support for it. It does
 not change reasoning effort or guarantee a faster response.
+
+`/cpa-status` distinguishes an unreachable OpenCode server (RPC) from failed
+CPA verification. It shows the selected transport and its fallback notes, not
+proof that a WebSocket request succeeded, along with the compaction mode and
+any reload needed to apply saved settings.
 
 TPS is measured over the whole turn, including tool calls and retries, rather
 than just the time spent generating text. See [how statistics are calculated](docs/reference.md#pause-and-statistics).
@@ -114,7 +119,7 @@ To change plugin options, edit its existing entry:
 ```jsonc
 {
   "plugins": [{
-    "package": "opencode2-cliproxyapi-provider@0.1.0",
+    "package": "opencode2-cliproxyapi-provider@0.1.1",
     "options": {
       "transport": "auto",
       "compaction": "summary",
@@ -137,6 +142,7 @@ provider; this plugin does not include a CPA service or account.
 
 ## Upgrade or uninstall
 
+Publishing a new version does not upgrade an existing pinned installation.
 Back up your config before upgrading. Run
 `opencode plugin add opencode2-cliproxyapi-provider@<version>` with the published
 version you want, then check `opencode plugin list` for duplicate or old entries.
@@ -146,7 +152,7 @@ Restart OpenCode if it has not picked up the change.
 To uninstall:
 
 ```sh
-opencode plugin remove opencode2-cliproxyapi-provider@0.1.0
+opencode plugin remove opencode2-cliproxyapi-provider@0.1.1
 ```
 
 Also remove any entry you added manually to a project config. Credentials,

@@ -31,18 +31,18 @@
 
 ```sh
 opencode --version
-opencode plugin add opencode2-cliproxyapi-provider@0.1.0
+opencode plugin add opencode2-cliproxyapi-provider@0.1.1
 opencode plugin list
 ```
 
-这样会固定使用 `0.1.0`，直到你手动升级。无需执行 `npm install -g`，也无需下载本仓库源码。
+这样会固定使用 `0.1.1`，直到你手动升级。无需执行 `npm install -g`，也无需下载本仓库源码。
 
 也可以在现有 `opencode.json(c)` 的 `plugins` 数组中添加：
 
 ```jsonc
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode2-cliproxyapi-provider@0.1.0"]
+  "plugins": ["opencode2-cliproxyapi-provider@0.1.1"]
 }
 ```
 
@@ -64,7 +64,7 @@ opencode plugin list
 | 命令 | 说明 |
 | --- | --- |
 | `/cpa-connect` | 验证并保存 CPA 地址和 API key |
-| `/cpa-status` | 查看连接、模型列表、Fast 模式和传输设置 |
+| `/cpa-status` | 查看连接、模型列表、Fast、选用的传输方式、压缩模式和待生效设置 |
 | `/cpa-refresh` | 刷新模型列表并应用变更 |
 | `/cpa-fast` | 开启或关闭 Fast 模式，重启后保留设置 |
 | `/cpa-pause` | 暂停发送新的 CPA 请求；已发出的请求继续处理 |
@@ -72,6 +72,8 @@ opencode plugin list
 | `/cpa-stats` | 查看当前会话的耗时、TPS、token 和缓存用量 |
 
 界面底部会显示连接状态和上一轮对话的统计。Fast 模式只会向明确支持该功能的模型发送 `priority` 参数，不改变推理档位，也不保证响应更快。
+
+`/cpa-status` 会区分 OpenCode 服务端 RPC 断连与 CPA 验证失败。传输状态显示选用的方式及回退说明，不代表 WebSocket 请求已经成功；同时显示压缩模式，以及保存的设置是否仍需重新加载才能生效。
 
 TPS 按整轮对话的耗时计算，包含工具调用和重试时间，不等同于模型生成文本时的速度。详见[统计说明](docs/reference.md#pause-and-statistics)。
 
@@ -88,7 +90,7 @@ TPS 按整轮对话的耗时计算，包含工具调用和重试时间，不等�
 ```jsonc
 {
   "plugins": [{
-    "package": "opencode2-cliproxyapi-provider@0.1.0",
+    "package": "opencode2-cliproxyapi-provider@0.1.1",
     "options": {
       "transport": "auto",
       "compaction": "summary",
@@ -106,12 +108,12 @@ TPS 按整轮对话的耗时计算，包含工具调用和重试时间，不等�
 
 ## 升级与卸载
 
-升级前先备份配置。执行 `opencode plugin add opencode2-cliproxyapi-provider@<版本号>`，指定要安装的已发布版本，再用 `opencode plugin list` 检查是否有重复或旧的配置项。`opencode plugin update` 会跳过已固定版本的插件。如果变更尚未生效，重启 OpenCode。
+发布新版本不会升级已有的固定版本安装。升级前先备份配置。执行 `opencode plugin add opencode2-cliproxyapi-provider@<版本号>`，指定要安装的已发布版本，再用 `opencode plugin list` 检查是否有重复或旧的配置项。`opencode plugin update` 会跳过已固定版本的插件。如果变更尚未生效，重启 OpenCode。
 
 卸载命令：
 
 ```sh
-opencode plugin remove opencode2-cliproxyapi-provider@0.1.0
+opencode plugin remove opencode2-cliproxyapi-provider@0.1.1
 ```
 
 如果曾手动添加项目配置，也请移除对应的插件项。凭证、会话和插件数据由 OpenCode 单独管理，卸载插件不保证同时删除这些数据。

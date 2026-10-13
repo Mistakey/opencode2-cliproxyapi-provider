@@ -42,7 +42,7 @@ describe("parseSnapshot", () => {
 
 describe("describeConnection", () => {
   test("separates offline, unconfigured, saved and verified", () => {
-    expect(describeConnection(snapshot(), false)).toBe("CPA offline")
+    expect(describeConnection(snapshot(), false)).toBe("OpenCode RPC offline")
     expect(describeConnection(undefined, true)).toBe("CPA not configured")
     expect(describeConnection(snapshot({ verified: "unknown" }), true)).toBe("CPA saved · Fast off")
     expect(describeConnection(snapshot({ verified: "unknown", keySaved: false }), true)).toBe(
@@ -84,6 +84,45 @@ describe("describeConnection", () => {
     expect(detail).toContain("last refresh: 2023-11-14T22:13:20.000Z (from cache)")
     expect(detail).toContain("stale: 1 (gone-model)")
     expect(detail).not.toContain("sk-")
+  })
+
+  test("shows selected transport, compaction and fallback notes, not WebSocket success", () => {
+    const detail = describeDetail(snapshot({
+      transport: "websocket", transportSource: "directory", compaction: "native",
+      transportNote: "requested WebSocket; HTTP fallback remains possible",
+      compactionNote: "native is unavailable for this model",
+      applied: false, reloadRequired: true,
+    }), true, undefined)
+    expect(detail).toContain("transport (selected): websocket (from directory; not a connection-success check)")
+    expect(detail).toContain("transport note: requested WebSocket; HTTP fallback remains possible")
+    expect(detail).toContain("compaction: native")
+    expect(detail).toContain("compaction note: native is unavailable for this model")
+    expect(detail).toContain("apply: reload required")
+
+    const http = describeDetail(snapshot({ transport: "http", transportSource: "option", compaction: "summary" }), true, undefined)
+    expect(http).toContain("transport (selected): http (from option; not a connection-success check)")
+    expect(http).toContain("compaction: summary")
+    expect(http).toContain("apply: live in the runtime")
+    expect(http).not.toContain("transport note:")
+    expect(http).not.toContain("compaction note:")
+    const unknown = describeDetail(snapshot({ applied: undefined, transport: undefined, compaction: undefined }), true, undefined)
+    expect(unknown).toContain("transport (selected): (unknown)")
+    expect(unknown).toContain("compaction: (unknown)")
+    expect(unknown).toContain("apply: (unknown)")
+  })
+
+  test("distinguishes a lost host RPC link from failed CPA verification", () => {
+    const failed = snapshot({ verified: "failed", verifyKind: "auth", verifyMessage: "CPA rejected the credential" })
+    const rpcDown = describeDetail(failed, false, "ECONNREFUSED")
+    expect(rpcDown).toContain("OpenCode server unreachable over RPC: ECONNREFUSED")
+    expect(rpcDown).toContain("CPA connection status is unknown")
+    expect(rpcDown).not.toContain("verified: failed")
+    const cpaFailed = describeDetail(failed, true, undefined)
+    expect(cpaFailed).toContain("OpenCode RPC: connected")
+    expect(cpaFailed).toContain("verified: failed (auth)")
+    expect(cpaFailed).toContain("detail: CPA rejected the credential")
+    expect(cpaFailed).not.toContain("unreachable over RPC")
+    expect(describeDetail(undefined, true, undefined)).toContain("CPA is not configured")
   })
 
   test("the detail view never contains key material", () => {

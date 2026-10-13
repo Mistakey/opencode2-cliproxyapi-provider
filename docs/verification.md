@@ -17,9 +17,11 @@ CI 通过只说明该工作流通过，不代表所有模型、宿主版本或�
   and both exports, then one installed-package run on OpenCode `2.0.26`, Windows,
   loopback mocks and fictional keys. No real CPA model requests are part of CI.
 
-The release changes packaging/documentation/CI, not those historical acceptance
-boundaries. Historical failed/blocked checks remain historical; targeted fixes do
-not retroactively turn them into a full-build review or all-model acceptance.
+`0.1.1` adds duration-display and status-detail regressions plus publication
+retry/conflict tests. These are offline changes, not new real-CPA acceptance.
+Release changes do not expand those historical acceptance boundaries.
+Historical failed/blocked checks remain historical; targeted fixes do not
+retroactively turn them into a full-build review or all-model acceptance.
 
 ## Matrix
 

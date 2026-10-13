@@ -17,7 +17,7 @@ files, raw acceptance/host logs, private CPA URLs or conversation content.
 If a credential was exposed, revoke/rotate it with its owner; deleting a comment
 or making a later clean commit does not revoke it.
 
-## Dependency advisories at 0.1.0
+## Dependency advisories at 0.1.0–0.1.1
 
 The pinned OpenTUI/Solid dependency chain includes Seroval versions flagged by
 [GHSA-p6vx-979v-rg4c](https://github.com/advisories/GHSA-p6vx-979v-rg4c) and

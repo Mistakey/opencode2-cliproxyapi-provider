@@ -34,13 +34,33 @@ repository permission. It never publishes.
 exact version tag (not main), for example:
 
 ```sh
-gh workflow run publish.yml --ref v0.1.0
+gh workflow run publish.yml --ref v0.1.1
 ```
 
 The workflow checks that the tag matches the manifest, repeats the same Windows
 verification, downloads the exact checked tarball, and publishes it using npm
-OIDC. Only the publish job receives `id-token: write`; no stored npm publish token
-is used. The tarball is not rebuilt between verification and publication.
+OIDC with required provenance. Only the publish job receives `id-token: write`;
+no stored npm publish token is used. A separate Release job receives
+`contents: write` and no OIDC permission. The tarball is not rebuilt between
+verification and publication.
+
+Before publishing, the workflow reads the exact public npm version. Only a 404
+means it may publish; a registry/auth/network failure stops it. An existing version
+must have the same integrity and tarball bytes, with OIDC provenance, or the run
+stops without overwriting anything. After a publish, bounded registry reads
+reconcile even a lost CLI response without repeating the write.
+
+The Release job rechecks public npm bytes, requires the existing tag to resolve
+to the verified commit, and uses the version's bilingual changelog plus links to
+both READMEs and verification/security boundaries. It creates a draft, attaches
+the checked `.tgz` and `SHA256SUMS`, then publishes the Release. On retry, matching
+notes/assets are preserved and missing assets are added; conflicting content
+stops the run. Tags and existing assets are never moved or replaced.
+
+If npm succeeded but a later step failed, rerun the original failed jobs or
+manually dispatch **the same tag**. Full dispatch repeats CI and must reproduce
+the same artifact. Do not bump a version just to finish its Release, and do not
+switch to token publishing after OIDC failure.
 
 ### npm trusted publishing
 
@@ -80,9 +100,10 @@ or republish an existing immutable version to test authentication.
 
 - Read npm's `dist.integrity`, download the public exact version and compare it
   with the verified tarball. Exercise that installed artifact with mock fixtures.
-- Create a GitHub Release on the same tag; attach the tarball and checksum if
-  desired. Link to npm, both READMEs and the honest verification boundaries.
-- Install into the user's **confirmed** OpenCode/config location only after a
+- Confirm the workflow's GitHub Release is public on the same tag, with both
+  language links, the verified tarball and checksum attachments.
+- Publication does **not** authorize updating an existing installation. Install
+  into the user's **confirmed** OpenCode/config location only after a
   backup, with `opencode plugin add <name>@<exact-version>`. Check the resolved
   version and entries, preserving unrelated settings and credentials.
 - Do not send a paid model request as an installation check. Loading a configured
@@ -91,4 +112,4 @@ or republish an existing immutable version to test authentication.
 - If a bad immutable release escapes, publish a corrected version and document
   rollback/pinning; do not move its Git tag or pretend an artifact was replaced.
 
-中文摘要：检查双语文档、许可、依赖、Git 历史及实际 npm 产物；PR/普通 push 不发布。发布工作流只能对精确 tag 手动触发，并优先使用 npm OIDC。首次包若须人工引导，使用官方登录/2FA 发布已验证 tarball，不能声称具备 CI provenance。发布后校验 registry 产物，再备份并安装用户已确认的固定版本；不追加收费模型测试。
+中文摘要：检查双语文档、许可、依赖、Git 历史及实际 npm 产物；PR/普通 push 不发布。精确 tag 手动触发 OIDC 发布，随后自动核验公开 registry 的 integrity、包字节及 provenance，并生成双语 Release 与 tgz/校验和附件。npm 已成功时可重试同一 tag：同内容继续收尾，冲突则停止，不覆盖版本、移动 tag 或替换附件。OIDC 与 Release 写权限分属不同作业，认证失败不退回 token。0.1.0 首发的人工引导不代表 CI provenance。发布不授权升级日常安装；安装固定新版本须另获用户同意，不追加收费模型测试。

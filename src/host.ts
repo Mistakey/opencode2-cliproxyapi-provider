@@ -8,7 +8,7 @@
 
 export const PLUGIN_ID = "opencode2-cliproxyapi-provider"
 export const PLUGIN_NAME = "CLIProxyAPI"
-export const PLUGIN_VERSION = "0.1.0"
+export const PLUGIN_VERSION = "0.1.1"
 
 /** Value sent as `client_version` when reading the CPA directory. */
 export const CLIENT_VERSION = `${PLUGIN_ID}/${PLUGIN_VERSION}`
