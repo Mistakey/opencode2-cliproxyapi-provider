@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SessionStatsTracker, readTokens, tokenTotal, type TokenCounts } from "../../src/stats"
+import { PauseGate } from "../../src/pause"
 
 let nextId = 0
 function event(type: string, data: Record<string, unknown>, created: number) {
@@ -87,6 +88,42 @@ describe("SessionStatsTracker", () => {
     expect(turn.effectiveMs).toBe(500)
     // 4 output tokens over 0.5s of effective time.
     expect(turn.tps).toBe(8)
+  })
+
+  test("a fresh tracker retains gate wait notified before the first turn event", async () => {
+    // Retained session after reload: index.ts wires synchronous gate callbacks
+    // while execution boundaries arrive through the asynchronous subscription.
+    let clock = 1791852956706
+    const tracker = new SessionStatsTracker({ now: () => clock })
+    const gate = new PauseGate({
+      now: () => clock,
+      onWaitStart: (sessionID) => tracker.notePauseStart(sessionID),
+      onWaitEnd: (sessionID) => tracker.notePauseEnd(sessionID),
+    })
+    gate.pause()
+    clock = 1791852956869
+    // The host starts this execution, but its event subscription has not yet
+    // delivered the boundary when the synchronous model-request hook waits.
+    const waiting = gate.wait("ses_a")
+    expect(gate.read().waiting).toBe(1)
+    tracker.observe(event("session.execution.started", {}, clock))
+    clock = 1791852958328
+    gate.resume()
+    await waiting
+    clock = 1791852960988
+    tracker.observe(event("session.step.ended", { assistantMessageID: "msg_fast", tokens: usage(tokens(1583, 7)) }, clock))
+    tracker.observe(event("session.execution.succeeded", {}, clock))
+
+    // Hand-calculated from the retained real timestamps: overlap 1459ms,
+    // 4119ms wall time minus that overlap = 2660ms effective time.
+    expect(tracker.read("ses_a")!.lastTurn).toMatchObject({
+      durationMs: 4119,
+      pausedMs: 1459,
+      effectiveMs: 2660,
+      steps: 1,
+      retries: 0,
+    })
+    expect(tracker.read("ses_a")!.lastTurn!.tps).toBeCloseTo(2.6315789473684212)
   })
 
   test("a pause outside any turn is not attributed to a turn", () => {

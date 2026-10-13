@@ -263,8 +263,8 @@ export class SessionStatsTracker {
 
   /** A model call for this session started waiting at the pause gate. */
   notePauseStart(sessionID: string): void {
-    const record = this.#sessions.get(sessionID)
-    if (!record) return
+    // The model hook can wait before the event subscription sees this session.
+    const record = this.#record(sessionID)
     if (record.pauseStartedAt === undefined) record.pauseStartedAt = this.#now()
   }
 
