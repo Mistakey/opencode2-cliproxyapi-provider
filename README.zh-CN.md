@@ -5,24 +5,29 @@
 [![CI](https://github.com/Mistakey/opencode2-cliproxyapi-provider/actions/workflows/ci.yml/badge.svg)](https://github.com/Mistakey/opencode2-cliproxyapi-provider/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/opencode2-cliproxyapi-provider)](https://www.npmjs.com/package/opencode2-cliproxyapi-provider)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![已测宿主](https://img.shields.io/badge/tested_OpenCode-2.0.26-informational)](docs/verification.md)
+[![已测试的 OpenCode 版本](https://img.shields.io/badge/tested_OpenCode-2.0.26-informational)](docs/verification.md)
 
-将 **OpenCode v2** 连接到你的 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（CPA）服务：读取模型目录，使用 OpenCode **原生 Responses 运行时**，通过 HTTP/SSE 或 WebSocket 完成对话、工具调用和 summary 压缩。
+在 OpenCode v2 中使用 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)（CPA）提供的模型，支持模型发现、工具调用、对话摘要，以及 HTTP/SSE 和 WebSocket 连接。
 
-这是独立的 OpenCode 插件，**不是 OpenCode 或 CPA 官方产品**。[CPA 官方 Pi 插件](https://github.com/router-for-me/pi-cliproxyapi-provider)是功能参考；本项目使用 OpenCode 公开接口，不复制运行时补丁，也不管理上游供应商登录。
+这是一个独立插件，并非 OpenCode 或 CPA 官方产品。功能参考了 [CPA 官方 Pi 插件](https://github.com/router-for-me/pi-cliproxyapi-provider)，通过 OpenCode 原生 Responses 运行时和公开插件接口实现。
 
-## 能做什么
+## 功能
 
-- **连接与凭证**：遮罩 key 向导先验证地址/key，再交给 OpenCode 原生凭证存储；也支持原生 `/connect`。
-- **模型目录**：推理档位、图片能力、按连接缓存、stale 模型保留和有边界的目录恢复。
-- **请求控制**：对明确声明能力的模型开启 Fast；暂停/恢复；按会话统计耗时、TPS、token/cache。
-- **保持原生**：工具、传输和 summary 由 OpenCode 负责；同包 TUI 通过 RPC 操作服务端，支持远程连接。
+- 通过连接向导设置 CPA，将 API key 保存到 OpenCode 的凭证存储中。
+- 从 CPA 模型列表读取模型能力和可选的推理档位。
+- 缓存模型列表，暂时保留从列表中消失的模型。
+- 为支持的模型切换 Fast 模式，或暂停、恢复请求。
+- 查看会话耗时、每秒输出 token 数（TPS），以及 token 和缓存用量。
+- 本地和远程 OpenCode 服务端均可使用这些终端命令。
 
-**支持边界**：已测宿主为 Windows 上的 **OpenCode 2.0.26**；加载允许范围为 `>=2.0.26 <3`，不代表所有版本已验证。**不支持 OpenCode v1**。真实 CPA 只覆盖有限范围；native 压缩和物理终端完整操作未验证。详见[验证范围](docs/verification.md)。
+## 使用要求
+
+- **OpenCode `>=2.0.26 <3`**。已在 Windows 上测试 **2.0.26**，其他版本尚未验证。不支持 OpenCode v1。
+- 可用的 CPA 服务和 API key；服务需支持 `/v1/models` 和 `/v1/responses`。
 
 ## 安装
 
-先单独安装 OpenCode v2，再安装插件的固定发布版：
+使用 OpenCode 的插件命令安装，并指定版本：
 
 ```sh
 opencode --version
@@ -30,9 +35,9 @@ opencode plugin add opencode2-cliproxyapi-provider@0.1.0
 opencode plugin list
 ```
 
-[官方插件命令](https://opencode.ai/v2/docs/plugins)管理包与全局配置；精确版本保持固定。**不要**对本插件使用 `npm install -g`，日常环境也不要引用开发源码目录。
+这样会固定使用 `0.1.0`，直到你手动升级。无需执行 `npm install -g`，也无需下载本仓库源码。
 
-也可以在现有 `opencode.json(c)` 中增加插件项，**不要覆盖其他配置**：
+也可以在现有 `opencode.json(c)` 的 `plugins` 数组中添加：
 
 ```jsonc
 {
@@ -41,20 +46,44 @@ opencode plugin list
 }
 ```
 
-默认全局配置目录是 `~/.config/opencode`，Windows 为 `%USERPROFILE%\.config\opencode`；项目配置也会生效。两种安装方式选一种，保持**一个**插件入口；从源码迁移时移除本插件旧的源码路径入口。服务端与 TUI 在同一包中，**不要再次添加到 `cli.json`**。使用远程服务端时，在服务端配置插件，终端会从服务端的插件列表发现 TUI。
+默认全局配置目录为 `~/.config/opencode`，Windows 下为 `%USERPROFILE%\.config\opencode`；项目配置也会生效。请保留其他设置，本插件只添加一次。如果此前从源码目录加载，请移除旧的路径配置。
+
+服务端插件和终端界面（TUI）包含在同一个包中，**不需要再添加到 `cli.json`**。使用远程 OpenCode 服务端时，在服务端安装插件即可，终端会自动加载对应的界面。详见 [OpenCode 插件文档](https://opencode.ai/v2/docs/plugins)。
 
 ## 连接 CPA
 
-1. 打开 OpenCode，运行 **`/cpa-connect`**。
-2. 输入 CPA 基础地址；有反向代理子路径时一并填写。
-3. 在遮罩输入框填写 API key；目录探测成功后，将连接保存到 OpenCode 原生凭证存储。
-4. 在 OpenCode 选择发现的模型；**`/cpa-status`** 可查看连接状态。
+1. 打开 OpenCode，运行 `/cpa-connect`。
+2. 输入 CPA 地址；使用反向代理时，请包含完整子路径。
+3. 输入 API key，输入内容不会明文显示。插件验证连接成功后，会将其保存到 OpenCode 的凭证存储中。
+4. 在 OpenCode 中选择模型，用 `/cpa-status` 查看连接状态。
 
-原生 `/connect` 是先保存、后报告验证状态；`/cpa-connect` 是**先验证，再替换已有连接**。“已保存”不等于“验证成功”。不要把 API key 提交到配置文件或 Git。
+也可以使用 OpenCode 内置的 `/connect`，但它会先保存连接再验证。`/cpa-connect` 则先验证，连接失败时不会替换原有设置。不要将含有 API key 的配置文件提交到 Git。
 
-无界面环境可向服务端注入 `CLIPROXYAPI_BASE_URL` 和 `CLIPROXYAPI_API_KEY`。显式选项优先于环境变量与已保存设置，但不会悄悄混配不同地址的 key。详见[配置与 RPC 参考](docs/reference.md#configuration)。
+## 常用命令
 
-非敏感选项可写在现有插件项中：
+| 命令 | 说明 |
+| --- | --- |
+| `/cpa-connect` | 验证并保存 CPA 地址和 API key |
+| `/cpa-status` | 查看连接、模型列表、Fast 模式和传输设置 |
+| `/cpa-refresh` | 刷新模型列表并应用变更 |
+| `/cpa-fast` | 开启或关闭 Fast 模式，重启后保留设置 |
+| `/cpa-pause` | 暂停发送新的 CPA 请求；已发出的请求继续处理 |
+| `/cpa-resume` | 恢复暂停中的请求 |
+| `/cpa-stats` | 查看当前会话的耗时、TPS、token 和缓存用量 |
+
+界面底部会显示连接状态和上一轮对话的统计。Fast 模式只会向明确支持该功能的模型发送 `priority` 参数，不改变推理档位，也不保证响应更快。
+
+TPS 按整轮对话的耗时计算，包含工具调用和重试时间，不等同于模型生成文本时的速度。详见[统计说明](docs/reference.md#pause-and-statistics)。
+
+### 连接或模型列表变更何时生效
+
+部分设置保存后，需要重新加载当前工作目录才能用于后续请求，此时状态中会显示 `reloadRequired: true`。TUI 会在需要时自动重新加载，同时取消暂停中的请求并重置会话统计。通过 RPC 调用的客户端需要自行处理重新加载，详见[设置生效说明](docs/reference.md#applying-changes)。
+
+## 配置
+
+不使用 TUI 时，可以在服务端环境中设置 `CLIPROXYAPI_BASE_URL` 和 `CLIPROXYAPI_API_KEY`。插件配置优先于环境变量，环境变量优先于已保存的连接。为某个地址保存的 key 不会用于其他地址。完整规则和选项见[配置参考](docs/reference.md#configuration)。
+
+修改插件选项时，编辑已有的插件配置项即可：
 
 ```jsonc
 {
@@ -69,66 +98,53 @@ opencode plugin list
 }
 ```
 
-`modelsDev` 默认是 `true`；示例的 `false` 关闭可选公共价格查询。已有连接时，加载插件会读取 CPA 模型目录，或先返回缓存再后台刷新；后续失败或 stale 目录可能安排重试。默认还会读取 `https://models.dev/api.json`，仅提供**价格估算，不是账单**。你在 OpenCode 中的模型使用可能产生上游费用；插件不提供 CPA 账户或 key。
+- `transport: "auto"`：根据模型列表和运行时支持情况选择 HTTP 或 WebSocket。
+- `compaction: "summary"`：使用 OpenCode 的对话摘要压缩上下文，这是默认方式。
+- `modelsDev: false`：关闭价格查询。默认值为 `true`，会从 `https://models.dev/api.json` 获取公开价格，用于估算费用，不代表 CPA 的实际账单。
 
-## 常用命令
-
-| 命令 | 用途 |
-| --- | --- |
-| `/cpa-connect` | 验证并保存地址/key |
-| `/cpa-status` | 查看连接、目录、Fast、传输及待生效状态 |
-| `/cpa-refresh` | 强制刷新目录，必要时应用变更 |
-| `/cpa-fast` | 切换持久 Fast 偏好；只对声明能力的模型发送 priority |
-| `/cpa-pause` | 暂停下一次 CPA 请求；在飞请求继续完成 |
-| `/cpa-resume` | 释放等待中的请求 |
-| `/cpa-stats` | 当前会话耗时、整轮 TPS 与 token/cache 用量 |
-
-页脚显示简短 CPA 状态和上一轮统计。Fast 不改变推理档位，也不保证延迟更低。价格和 TPS 有明确的[计算口径](docs/reference.md#pause-and-statistics)。
-
-### 连接或目录变更何时生效
-
-变更可能已经**保存**，但运行时尚未使用（`reloadRequired: true`）。TUI 会在需要时调用 OpenCode 的 location reload。reload 会取消暂停中的请求并清空内存统计，**不会偷偷放行暂停请求**。无界面调用方须自行执行相同的公开 reload；空 binding 首次接入的例外与 RPC 契约见[参考](docs/reference.md#applying-changes)。
+配置连接后，插件启动时会读取 CPA 模型列表，或先使用缓存再后台刷新。后续刷新失败时可能自动重试。通过 OpenCode 发起模型请求可能产生上游费用；本插件不提供 CPA 服务或账户。
 
 ## 升级与卸载
 
-先备份配置。升级时选择真实已发布的版本，用 `opencode plugin add <包名>@<版本>` 替换当前精确版本；检查 `opencode plugin list`，清理本插件旧的重复/源码入口。`opencode plugin update` 会跳过精确版本，因此升级由你主动决定。若变更未自动加载，再重启 OpenCode。
+升级前先备份配置。执行 `opencode plugin add opencode2-cliproxyapi-provider@<版本号>`，指定要安装的已发布版本，再用 `opencode plugin list` 检查是否有重复或旧的配置项。`opencode plugin update` 会跳过已固定版本的插件。如果变更尚未生效，重启 OpenCode。
+
+卸载命令：
 
 ```sh
 opencode plugin remove opencode2-cliproxyapi-provider@0.1.0
 ```
 
-若项目配置中还手动写了入口，也须移除。卸载插件不保证清除原生凭证、会话或插件存储，应通过 OpenCode 管理这些数据，不要删除其他宿主数据。
+如果曾手动添加项目配置，也请移除对应的插件项。凭证、会话和插件数据由 OpenCode 单独管理，卸载插件不保证同时删除这些数据。
 
-## 排错
+## 常见问题
 
-| 现象 | 检查方向 |
+| 问题 | 处理方法 |
 | --- | --- |
-| 没有 CPA 命令 | 查看服务端插件列表和精确版本，不要在 `cli.json` 重复配置 |
-| key 已保存但未验证/离线 | 用 `/cpa-status` 查看；`/cpa-connect` 验证明确的地址/key 后才保存 |
-| 首次无缓存启动失败 | CPA 恢复后用 `/cpa-refresh`；**首次无缓存读取不会自动重试** |
-| 待生效或撤回 Fast 后请求被拒绝 | reload location；它会取消暂停请求并重置统计 |
-| 请求 WS 却走 HTTP | 查看 `transportNote`；回退成功不证明 WS 成功 |
-| native 压缩不可用 | 保留默认 `summary`；native 仅显式开启，未做真实 CPA 验证 |
-| `opencode models` 没列出模型 | 2.0.26 的该命令使用自身 location；以会话模型选择器或指定 location 的 `model.list` 为准 |
+| 找不到 CPA 命令 | 检查服务端的插件列表和版本，无需在 `cli.json` 中单独配置 TUI。 |
+| key 已保存，但连接仍然离线 | 用 `/cpa-status` 查看状态，或运行 `/cpa-connect` 重新验证地址和 key。 |
+| 首次启动时 CPA 不可用 | CPA 恢复后运行 `/cpa-refresh`。没有缓存时，首次模型列表请求失败不会自动重试。 |
+| 设置已保存但未生效，或关闭 Fast 后请求被拒绝 | 重新加载当前工作目录；这会取消暂停中的请求并重置统计。 |
+| 使用了 HTTP 而不是 WebSocket | 查看 `transportNote`，OpenCode 可能已回退到 HTTP。 |
+| native 压缩不可用 | 保留默认的 `summary`。native 是可选功能，尚未在真实 CPA 上测试。 |
+| `opencode models` 没有列出模型 | 2.0.26 中，该命令使用单独的 location。请在会话中选择模型，或调用 `model.list` 时指定会话所在的 location。 |
 
-提 issue 时附宿主/插件版本、操作系统及**脱敏**状态或最小复现。不要发布凭证、私人服务地址、对话内容或原始宿主日志。安全问题见[报告指引](SECURITY.md)。
+反馈问题时，请附上 OpenCode 和插件版本、操作系统及复现步骤。分享状态信息或日志前，请移除 key、私人服务地址和对话内容。安全问题见[报告说明](SECURITY.md)。
 
-## 已完成的验证及边界
+## 测试情况
 
-真实 CPA 基线为 `11eb30e`，宿主 `2.0.26`，只测一个模型 `gpt-6.1-sol`。`16afc4b` 的暂停计时修正只做了离线验证，不代表后来整个构建重新通过真实验收。更广的协议、故障恢复检查使用 mock。CI 会用**虚构凭证**将安装产物加载到真实宿主，但不是全模型、全版本或物理 TUI 认证。
+真实 CPA 测试使用 OpenCode `2.0.26` 和 `gpt-6.1-sol`，对应提交 `11eb30e`。后来的暂停计时修正（`16afc4b`）仅做了离线测试。其他模型尚未在真实 CPA 上验证。
 
-[验证矩阵](docs/verification.md) · [技术参考](docs/reference.md) · [架构决定](docs/adr/0001-native-runtime.md)
+自动化测试使用模拟 CPA 服务，覆盖更多协议和故障恢复场景。CI 还会安装打包后的插件，使用 OpenCode `2.0.26` 和测试凭证进行检查。native 压缩目前只通过模拟服务测试；TUI 有模块测试，但尚未在实际终端中完整手动测试。详细范围见[测试覆盖表](docs/verification.md)。
 
 ## 隔离开发与测试
 
-开发和 CI 不使用你的日常配置或真实 CPA 凭证。`OPENCODE_CLI` 指定真实宿主二进制；`OC2CPA_SANDBOX` 指定隔离的 home/config/data/cache/state 目录；协议测试服务只监听 loopback。
+请使用单独的测试环境，不要使用平时的 OpenCode 配置或真实 CPA 凭证。将 `OPENCODE_CLI` 设为 OpenCode `2.0.26` 可执行文件的路径；`OC2CPA_SANDBOX` 可指定测试配置和数据的存放目录。冒烟测试只连接本机的模拟服务。
 
 ```sh
 npm ci --cache .forge/local/npm-cache --no-audit --no-fund
 bun test
 bun run typecheck
-# 先设置 OPENCODE_CLI 为 OpenCode 2.0.26 可执行文件：
 bun run smoke:package
 ```
 
-[开发与冒烟脚本](docs/development.md) · [发布流程](docs/releasing.md) · [变更记录](CHANGELOG.md) · [MIT 许可](LICENSE)
+[开发说明](docs/development.md) · [技术参考](docs/reference.md) · [发布流程](docs/releasing.md) · [变更记录](CHANGELOG.md) · [MIT 许可](LICENSE)
