@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 /**
  * OpenCode v2 TUI entry for the CLIProxyAPI provider.
  *

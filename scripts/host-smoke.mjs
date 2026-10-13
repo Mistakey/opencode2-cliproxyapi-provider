@@ -17,6 +17,8 @@
  * Usage: bun scripts/host-smoke.mjs   (node also works)
  * Env:   OPENCODE_CLI   path to the opencode executable
  *        OC2CPA_SANDBOX sandbox root (default: <repo>/.forge/local/oc2cpa-bya/sandbox/oc2cpa-bya.1)
+ *        OC2CPA_PLUGIN_PATH installed directory containing index.ts (default: <repo>/src)
+ *        OC2CPA_EXPECT_HOST require an exact host version (release check: 2.0.26)
  */
 
 import { spawn } from "node:child_process"
@@ -30,6 +32,7 @@ import { SUMMARY_PROMPT_MARKER, startMockCpa, textReply, toolCallReply } from ".
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..")
 const SANDBOX = process.env.OC2CPA_SANDBOX ?? join(ROOT, ".forge", "local", "oc2cpa-bya", "sandbox", "oc2cpa-bya.1")
 const OPENCODE = process.env.OPENCODE_CLI ?? "opencode"
+const PLUGIN_PATH = process.env.OC2CPA_PLUGIN_PATH ? resolve(process.env.OC2CPA_PLUGIN_PATH) : join(ROOT, "src")
 
 const FAKE_KEY = "sk-fake-smoke-0123456789abcdef"
 const PROVIDER_ID = "cliproxyapi"
@@ -79,6 +82,12 @@ const hostEnv = {
   TMP: join(SANDBOX, "tmp"),
   TEMP: join(SANDBOX, "tmp"),
   CLIPROXYAPI_API_KEY: FAKE_KEY,
+}
+// Inherited host config/server overrides must not escape the sandbox or load
+// a daily connection. The executable was selected above; no OPENCODE_* value
+// needs to reach the isolated child. All CPA traffic uses the loopback fixture.
+for (const name of Object.keys(hostEnv)) {
+  if (name.startsWith("OPENCODE_") || name === "CLIPROXYAPI_BASE_URL") delete hostEnv[name]
 }
 
 /**
@@ -142,6 +151,13 @@ async function main() {
   // and a leftover isolated service holds the data directory.
   for (const relative of ["home", "appdata", "localappdata", "tmp", "config/opencode", "ws"]) {
     mkdirSync(join(SANDBOX, relative), { recursive: true })
+  }
+  const version = await runOpencode(["--version"])
+  const reportedVersion = version.output.trim().split(/\r?\n/)[0]
+  const hostVersion = reportedVersion.replace(/^(?:opencode\s+)?v?/, "")
+  record("host reports its version", version.status === 0, reportedVersion)
+  if (version.status !== 0 || (process.env.OC2CPA_EXPECT_HOST && hostVersion !== process.env.OC2CPA_EXPECT_HOST)) {
+    throw new Error(`Host version mismatch: expected ${process.env.OC2CPA_EXPECT_HOST ?? "a runnable host"}, got ${reportedVersion}`)
   }
   await runOpencode(["service", "stop"])
   await sleep(500)
@@ -220,7 +236,7 @@ async function main() {
         $schema: "https://opencode.ai/config.json",
         plugins: [
           {
-            package: join(ROOT, "src"),
+            package: PLUGIN_PATH,
             options: { baseURL: mock.url, modelsDevURL: `${priceMock.url}/v1/models` },
           },
         ],
@@ -233,9 +249,7 @@ async function main() {
   console.log(`mock CPA: ${mock.url}`)
   console.log(`sandbox:  ${SANDBOX}`)
   console.log(`host:     ${OPENCODE}`)
-
-  const version = await runOpencode(["--version"])
-  record("host reports its version", version.status === 0, version.output.trim().split("\n")[0])
+  console.log(`plugin:   ${PLUGIN_PATH}`)
 
   const port = await freePort()
   await runOpencode(["service", "set", "port", String(port)])

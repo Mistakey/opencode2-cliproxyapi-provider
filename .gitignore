@@ -1,3 +1,12 @@
 .forge/local/
 .forge/materials/
 node_modules/
+# Local credentials, package artifacts and diagnostic output are never source.
+.env
+.env.*
+!.env.example
+.npmrc
+*.tgz
+*.log
+.DS_Store
+Thumbs.db

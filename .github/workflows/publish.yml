@@ -1,0 +1,55 @@
+name: Publish npm
+
+# Explicit dispatch on an existing version tag. Neither pushes nor PRs publish.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag:
+    if: github.repository == 'Mistakey/opencode2-cliproxyapi-provider'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Require tag/manifest agreement
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          if ($env:GITHUB_REF -cne "refs/tags/v$version") { throw 'Tag must equal v<package.version>' }
+  verify:
+    needs: tag
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+  publish:
+    needs: verify
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.13.0'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: npm-package
+          path: package
+      - name: Publish the verified tarball with npm OIDC
+        shell: pwsh
+        run: |
+          $packages = @(Get-ChildItem package/*.tgz)
+          if ($packages.Count -ne 1) { throw 'Expected exactly one verified package' }
+          $expected = ((Get-Content package/SHA256SUMS) -split '\s+')[0]
+          if ((Get-FileHash $packages[0].FullName -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw 'Artifact checksum mismatch' }
+          npm publish $packages[0].FullName --access public --registry=https://registry.npmjs.org/ --cache .forge/local/npm-cache

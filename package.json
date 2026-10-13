@@ -2,24 +2,38 @@
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode2-cliproxyapi-provider",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "OpenCode v2 provider plugin for CLIProxyAPI (CPA)",
   "license": "MIT",
-  "exports": {
-    ".": "./src/index.ts"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mistakey/opencode2-cliproxyapi-provider.git"
   },
-  "files": [
-    "src",
-    "README.md"
-  ],
+  "homepage": "https://github.com/Mistakey/opencode2-cliproxyapi-provider#readme",
+  "bugs": {
+    "url": "https://github.com/Mistakey/opencode2-cliproxyapi-provider/issues"
+  },
+  "keywords": ["opencode", "opencode-plugin", "cliproxyapi", "cpa", "provider"],
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx"
+  },
+  "files": ["src", "docs", "README.md", "README.zh-CN.md", "CHANGELOG.md", "SECURITY.md", "LICENSE"],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "dependencies": {
+    "@opencode/plugin": "2.0.26"
+  },
   "peerDependencies": {
-    "@opencode/plugin": ">=2.0.26 <3"
+    "@opentui/core": ">=0.5.17 <0.6",
+    "@opentui/solid": ">=0.5.17 <0.6",
+    "solid-js": ">=1.9.12 <2"
   },
   "devDependencies": {
     "@opencode/ai": "2.0.26",
     "@opencode/client": "2.0.26",
-    "@opencode/plugin": "2.0.26",
     "@opencode/schema": "2.0.26",
     "@opencode/theme": "2.0.26",
     "@opentui/core": "0.5.17",
@@ -33,6 +47,8 @@
     "test:unit": "bun test test/unit",
     "test:integration": "bun test test/integration",
     "typecheck": "tsc --noEmit",
+    "check:package": "bun scripts/package-check.mjs",
+    "smoke:package": "bun scripts/package-check.mjs --host",
     "smoke:host": "bun scripts/host-smoke.mjs",
     "smoke:connection": "bun scripts/host-connection.mjs",
     "smoke:first-connect": "bun scripts/host-first-connect.mjs",
