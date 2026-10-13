@@ -38,7 +38,7 @@ jobs:
           $env:OPENCODE_CLI = Join-Path $PWD '.forge/local/host/node_modules/@opencode/cli/bin/opencode.exe'
           bun run smoke:package
       - name: Retain only the verified package (no sandbox logs or credentials)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (Node 24)
         with:
           name: npm-package
           path: |
@@ -48,3 +48,21 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+      - name: Download the verified artifact (no publication)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2 (Node 24)
+        with:
+          name: npm-package
+          path: .forge/local/artifact-roundtrip
+      - name: Require byte-identical artifact round-trip
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          $expected = @("opencode2-cliproxyapi-provider-$version.tgz", 'SHA256SUMS', 'pack.json')
+          $actual = @(Get-ChildItem .forge/local/artifact-roundtrip -File | ForEach-Object Name)
+          if (@(Compare-Object ($expected | Sort-Object) ($actual | Sort-Object)).Count -ne 0) { throw 'Unexpected downloaded artifact files' }
+          foreach ($name in $expected) {
+            $before = (Get-FileHash (Join-Path '.forge/local/package' $name) -Algorithm SHA256).Hash
+            $after = (Get-FileHash (Join-Path '.forge/local/artifact-roundtrip' $name) -Algorithm SHA256).Hash
+            if ($before -cne $after) { throw "Artifact round-trip differs: $name" }
+          }
+          Write-Output 'PASS verified artifact upload/download round-trip: identical package, checksum and metadata'
