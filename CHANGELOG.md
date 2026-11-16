@@ -1,5 +1,22 @@
 # Changelog / 变更记录
 
+## 0.1.2
+
+- Fix OpenCode 2.3 connections: the stored CPA address is now read from the
+  credential's `metadata` (OpenCode 2.3) as well as `configuration` (2.0).
+  Before this, OpenCode 2.3 reported "stored CPA connection has no address"
+  and registered no models, even after reconnecting.
+
+- 修复 OpenCode 2.3 下的连接：同时从凭证的 `metadata`（2.3）与 `configuration`（2.0）
+  读取已保存的 CPA 地址。此前在 2.3 中会提示 “stored CPA connection has no address”，
+  重新连接也不会注册任何模型。
+
+**Verification remains bounded:** confirmed on Windows with OpenCode `2.3.0` that a
+saved connection is used and the CPA model list appears; no model requests were
+sent. CI still runs on OpenCode `2.0.26`.
+
+已在 Windows / OpenCode `2.3.0` 确认已保存的连接可用、CPA 模型列表正常显示，未发送模型请求；CI 仍在 OpenCode `2.0.26` 上运行。
+
 ## 0.1.1
 
 - Fix rounded session durations carrying into the next minute: `1m60s` now

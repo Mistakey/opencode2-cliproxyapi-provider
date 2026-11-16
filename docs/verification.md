@@ -19,6 +19,13 @@ CI 通过只说明该工作流通过，不代表所有模型、宿主版本或�
 
 `0.1.1` adds duration-display and status-detail regressions plus publication
 retry/conflict tests. These are offline changes, not new real-CPA acceptance.
+`0.1.2` reads the stored CPA address from OpenCode 2.3's credential `metadata`
+as well as 2.0's `configuration`. Checked on Windows with OpenCode `2.3.0`: a
+credential saved by `/cpa-connect` is used and `opencode models` lists the CPA
+directory. No model requests were sent; CI still runs on `2.0.26`.
+`0.1.2` 同时读取 OpenCode 2.3 凭证 `metadata` 与 2.0 `configuration` 中保存的 CPA 地址；
+已在 Windows / OpenCode `2.3.0` 确认 `/cpa-connect` 保存的凭证可用、`opencode models`
+能列出 CPA 模型，未发送模型请求；CI 仍在 `2.0.26` 上运行。
 Release changes do not expand those historical acceptance boundaries.
 Historical failed/blocked checks remain historical; targeted fixes do not
 retroactively turn them into a full-build review or all-model acceptance.
