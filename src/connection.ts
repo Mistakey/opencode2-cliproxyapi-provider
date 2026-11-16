@@ -173,7 +173,9 @@ export function readCredential<Connection>(
   if (!credential || credential.type !== "key") return undefined
   const key = credential.key.trim()
   if (!key) return undefined
-  const configured = credential.configuration?.address
+  // OpenCode 2.3 stores the connect answers under `metadata`; 2.0 used `configuration`.
+  const stored = credential as { metadata?: Record<string, unknown>; configuration?: Record<string, unknown> }
+  const configured = stored.metadata?.address ?? stored.configuration?.address
   const baseURL = typeof configured === "string" && configured.trim() ? configured.trim() : undefined
   return { connection, key, baseURL }
 }

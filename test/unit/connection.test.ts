@@ -195,6 +195,15 @@ describe("readCredential", () => {
     })
   })
 
+  test("reads the address OpenCode 2.3 stores under metadata", () => {
+    const resolved = readCredential({ type: "credential", id: "cred_2" }, {
+      type: "key",
+      key: "sk-fake",
+      metadata: { address: "http://stored.test" },
+    } as never)
+    expect(resolved?.baseURL).toBe("http://stored.test")
+  })
+
   test("ignores oauth credentials and blank keys", () => {
     expect(readCredential({}, { type: "oauth" } as never)).toBeUndefined()
     expect(readCredential({}, { type: "key", key: "  " })).toBeUndefined()
